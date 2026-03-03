@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>AI Sidebar Settings</title>
+  <link rel="stylesheet" href="options.css">
+</head>
+<body>
+  <div class="container">
+    <h1>AI Sidebar Settings</h1>
+
+    <section class="setting-group">
+      <h2>AI Provider</h2>
+      <div class="field">
+        <label for="activeProvider">Active Provider</label>
+        <select id="activeProvider">
+          <option value="claude">Claude (Anthropic)</option>
+          <option value="openai">OpenAI</option>
+          <option value="grok">Grok (xAI)</option>
+          <option value="lmstudio">LM Studio (Local)</option>
+        </select>
+      </div>
+    </section>
+
+    <section class="setting-group provider-config" data-provider="claude">
+      <h2>Claude Settings</h2>
+      <div class="field">
+        <label for="claude-apiKey">API Key</label>
+        <input type="password" id="claude-apiKey" placeholder="sk-ant-...">
+      </div>
+      <div class="field">
+        <label for="claude-model">Model</label>
+        <input type="text" id="claude-model" placeholder="claude-sonnet-4-20250514">
+      </div>
+    </section>
+
+    <section class="setting-group provider-config" data-provider="openai">
+      <h2>OpenAI Settings</h2>
+      <div class="field">
+        <label for="openai-apiKey">API Key</label>
+        <input type="password" id="openai-apiKey" placeholder="sk-...">
+      </div>
+      <div class="field">
+        <label for="openai-model">Model</label>
+        <input type="text" id="openai-model" placeholder="gpt-4o">
+      </div>
+    </section>
+
+    <section class="setting-group provider-config" data-provider="grok">
+      <h2>Grok Settings</h2>
+      <div class="field">
+        <label for="grok-apiKey">API Key</label>
+        <input type="password" id="grok-apiKey" placeholder="xai-...">
+      </div>
+      <div class="field">
+        <label for="grok-model">Model</label>
+        <input type="text" id="grok-model" placeholder="grok-3">
+      </div>
+    </section>
+
+    <section class="setting-group provider-config" data-provider="lmstudio">
+      <h2>LM Studio Settings</h2>
+      <div class="field">
+        <label for="lmstudio-endpoint">Endpoint</label>
+        <input type="text" id="lmstudio-endpoint" placeholder="http://localhost:1234">
+      </div>
+      <div class="field">
+        <label for="lmstudio-model">Model (optional)</label>
+        <input type="text" id="lmstudio-model" placeholder="Leave empty for default">
+      </div>
+    </section>
+
+    <section class="setting-group">
+      <h2>Appearance</h2>
+      <div class="field">
+        <label for="theme">Theme</label>
+        <select id="theme">
+          <option value="auto">Auto (follow system)</option>
+          <option value="light">Light</option>
+          <option value="dark">Dark</option>
+        </select>
+      </div>
+    </section>
+
+    <div class="actions">
+      <button id="save" class="btn-primary">Save Settings</button>
+      <span id="status" class="status"></span>
+    </div>
+  </div>
+
+  <script type="module" src="options.js"></script>
+</body>
+</html>
