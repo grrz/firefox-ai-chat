@@ -160,12 +160,9 @@ async function handleTabChange(tabId) {
 }
 
 // ========== Theme ==========
-function applyTheme(theme) {
-  const root = document.documentElement;
-  root.classList.remove('theme-light', 'theme-dark');
-  if (theme === 'light') root.classList.add('theme-light');
-  else if (theme === 'dark') root.classList.add('theme-dark');
-}
+// Colors follow Firefox's theme automatically via CSS system colors.
+// applyTheme kept as a no-op for settings compatibility.
+function applyTheme() {}
 
 // ========== Page Context ==========
 async function fetchPageContext() {

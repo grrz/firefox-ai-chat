@@ -1,74 +1,27 @@
-/* ========== CSS Custom Properties ========== */
+/* ========== CSS Custom Properties (Firefox system colors) ========== */
 :root {
-  --bg-primary: #ffffff;
-  --bg-secondary: #f3f4f6;
-  --bg-tertiary: #e5e7eb;
-  --text-primary: #1f2937;
-  --text-secondary: #6b7280;
-  --text-muted: #9ca3af;
-  --border-color: #e5e7eb;
-  --accent: #4285f4;
-  --accent-hover: #3367d6;
-  --accent-light: #e8f0fe;
-  --user-msg-bg: #4285f4;
-  --user-msg-text: #ffffff;
-  --ai-msg-bg: #f3f4f6;
-  --ai-msg-text: #1f2937;
+  color-scheme: light dark;
+
+  --bg-primary: Canvas;
+  --bg-secondary: color-mix(in srgb, CanvasText 5%, Canvas);
+  --bg-tertiary: color-mix(in srgb, CanvasText 10%, Canvas);
+  --text-primary: CanvasText;
+  --text-secondary: color-mix(in srgb, Canvas 35%, CanvasText);
+  --text-muted: GrayText;
+  --border-color: color-mix(in srgb, CanvasText 15%, Canvas);
+  --accent: AccentColor;
+  --accent-hover: color-mix(in srgb, CanvasText 15%, AccentColor);
+  --accent-light: color-mix(in srgb, AccentColor 15%, Canvas);
+  --user-msg-bg: AccentColor;
+  --user-msg-text: AccentColorText;
+  --ai-msg-bg: color-mix(in srgb, CanvasText 5%, Canvas);
+  --ai-msg-text: CanvasText;
   --code-bg: #1e1e1e;
   --code-text: #d4d4d4;
-  --error-bg: #fef2f2;
-  --error-text: #dc2626;
-  --error-border: #fca5a5;
-  --shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
-}
-
-/* Dark theme */
-@media (prefers-color-scheme: dark) {
-  :root:not(.theme-light) {
-    --bg-primary: #1a1a2e;
-    --bg-secondary: #16213e;
-    --bg-tertiary: #0f3460;
-    --text-primary: #e5e7eb;
-    --text-secondary: #9ca3af;
-    --text-muted: #6b7280;
-    --border-color: #374151;
-    --accent: #60a5fa;
-    --accent-hover: #3b82f6;
-    --accent-light: #1e3a5f;
-    --user-msg-bg: #2563eb;
-    --user-msg-text: #ffffff;
-    --ai-msg-bg: #16213e;
-    --ai-msg-text: #e5e7eb;
-    --code-bg: #0d1117;
-    --code-text: #e6edf3;
-    --error-bg: #451a1a;
-    --error-text: #f87171;
-    --error-border: #7f1d1d;
-    --shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
-  }
-}
-
-.theme-dark {
-  --bg-primary: #1a1a2e;
-  --bg-secondary: #16213e;
-  --bg-tertiary: #0f3460;
-  --text-primary: #e5e7eb;
-  --text-secondary: #9ca3af;
-  --text-muted: #6b7280;
-  --border-color: #374151;
-  --accent: #60a5fa;
-  --accent-hover: #3b82f6;
-  --accent-light: #1e3a5f;
-  --user-msg-bg: #2563eb;
-  --user-msg-text: #ffffff;
-  --ai-msg-bg: #16213e;
-  --ai-msg-text: #e5e7eb;
-  --code-bg: #0d1117;
-  --code-text: #e6edf3;
-  --error-bg: #451a1a;
-  --error-text: #f87171;
-  --error-border: #7f1d1d;
-  --shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+  --error-bg: color-mix(in srgb, #dc2626 10%, Canvas);
+  --error-text: color-mix(in srgb, #dc2626 80%, CanvasText);
+  --error-border: color-mix(in srgb, #dc2626 30%, Canvas);
+  --shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
 }
 
 /* ========== Reset & Base ========== */
