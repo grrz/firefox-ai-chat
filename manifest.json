@@ -17,7 +17,10 @@
     "https://api.openai.com/*",
     "https://api.x.ai/*",
     "http://localhost/*",
-    "http://127.0.0.1/*"
+    "http://127.0.0.1/*",
+    "https://youtube.com/*",
+    "https://*.youtube.com/*",
+    "https://*.youtube-nocookie.com/*"
   ],
   "sidebar_action": {
     "default_panel": "sidebar/sidebar.html",

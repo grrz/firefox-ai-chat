@@ -1,7 +1,7 @@
-import { renderMarkdown, renderPartialMarkdown } from './lib/markdown.js';
-import { ACTIONS } from '../shared/actions.js';
-import { loadSettings } from '../shared/settings.js';
-import { PROVIDERS } from '../shared/constants.js';
+import {renderMarkdown, renderPartialMarkdown} from './lib/markdown.js';
+import {ACTIONS} from '../shared/actions.js';
+import {loadSettings} from '../shared/settings.js';
+import {PROVIDERS} from '../shared/constants.js';
 
 // ========== State ==========
 
@@ -35,7 +35,6 @@ const newChatBtn = $('#newChatBtn');
 const settingsBtn = $('#settingsBtn');
 const loadingOverlay = $('#loadingOverlay');
 const pageTitleEl = $('#pageTitle');
-const pageUrlEl = $('#pageUrl');
 const pageWordCountEl = $('#pageWordCount');
 
 // ========== Initialization ==========
@@ -132,7 +131,6 @@ function updatePageInfo() {
   const ctx = state.pageContext;
   if (ctx) {
     pageTitleEl.textContent = ctx.title || 'Untitled page';
-    pageUrlEl.textContent = ctx.url || '';
     if (ctx.wordCount) {
       pageWordCountEl.textContent = `${ctx.wordCount.toLocaleString()} words extracted`;
     } else if (ctx.error) {
@@ -142,7 +140,6 @@ function updatePageInfo() {
     }
   } else {
     pageTitleEl.textContent = 'Loading page info...';
-    pageUrlEl.textContent = '';
     pageWordCountEl.textContent = '';
   }
 }
@@ -162,11 +159,10 @@ async function handleTabChange(tabId) {
 async function fetchPageContext(retries = 2) {
   try {
     loadingOverlay.classList.remove('hidden');
-    const result = await Promise.race([
-      browser.runtime.sendMessage({ type: 'getDistilledContent' }),
+    state.pageContext = await Promise.race([
+      browser.runtime.sendMessage({type: 'getDistilledContent'}),
       new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 5000)),
     ]);
-    state.pageContext = result;
   } catch {
     if (retries > 0) {
       // Content script may not be injected yet — retry after a short delay
