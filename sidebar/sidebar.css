@@ -316,44 +316,6 @@ body {
   overflow: hidden;
 }
 
-.clear-chat-btn {
-  position: absolute;
-  right: 12px;
-  top: 8px;
-  border: 1px solid var(--border-color);
-  border-radius: 8px;
-  padding: 4px 8px;
-  font-size: 11px;
-  text-transform: lowercase;
-  background: color-mix(in srgb, CanvasText 10%, Canvas);
-  color: var(--text-secondary);
-  cursor: pointer;
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 0.15s ease, background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
-  z-index: 4;
-}
-
-.chat-state.history-visible .clear-chat-btn {
-  top: 46px;
-}
-
-.chat-state:hover .clear-chat-btn {
-  opacity: 0.6;
-  pointer-events: auto;
-}
-
-.clear-chat-btn:hover {
-  opacity: 1;
-}
-
-.clear-chat-btn.confirming {
-  opacity: 1;
-  background: color-mix(in srgb, #dc2626 18%, Canvas);
-  border-color: color-mix(in srgb, #dc2626 45%, Canvas);
-  color: color-mix(in srgb, #dc2626 80%, CanvasText);
-}
-
 .messages {
   flex: 1;
   min-height: 0;
@@ -711,9 +673,10 @@ body {
 /* ========== Action Bar (Chat State) ========== */
 .action-bar {
   display: flex;
-  gap: 6px;
+  align-items: center;
+  gap: 8px;
   padding: 6px 12px;
-  overflow-x: auto;
+  overflow: visible;
   flex-shrink: 0;
   border-top: 1px solid var(--border-color);
 }
@@ -722,10 +685,25 @@ body {
   display: none;
 }
 
+.action-buttons-scroll {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+
+.action-buttons-scroll::-webkit-scrollbar {
+  display: none;
+}
+
 .action-btn {
   display: flex;
   align-items: center;
   gap: 4px;
+  flex-shrink: 0;
   padding: 4px 10px;
   font-size: 12px;
   font-weight: 500;
@@ -738,6 +716,18 @@ body {
   transition: all 0.15s ease;
 }
 
+.action-btn-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+}
+
+.action-btn-label {
+  display: inline;
+}
+
 .action-btn:hover {
   background: var(--accent-light);
   border-color: var(--accent);
@@ -747,6 +737,120 @@ body {
 .action-btn svg {
   width: 14px;
   height: 14px;
+}
+
+.action-buttons-scroll.compact .action-btn {
+  justify-content: center;
+}
+
+.action-buttons-scroll.compact .action-btn-label {
+  display: none;
+}
+
+.action-menu-wrap {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.action-menu-toggle {
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.action-menu-toggle:hover {
+  border-color: var(--accent);
+  background: var(--accent-light);
+  color: var(--text-primary);
+}
+
+.action-menu {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 6px);
+  min-width: 180px;
+  padding: 6px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--bg-primary);
+  box-shadow: var(--shadow);
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.action-menu-item {
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-primary);
+  text-align: left;
+  font-size: 13px;
+  padding: 7px 9px;
+  cursor: pointer;
+}
+
+.action-menu-item:hover {
+  background: var(--bg-secondary);
+}
+
+.action-menu-item.danger {
+  color: color-mix(in srgb, #dc2626 80%, CanvasText);
+}
+
+.action-menu-item.danger:hover {
+  background: color-mix(in srgb, #dc2626 10%, Canvas);
+}
+
+.action-menu-language {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 9px;
+}
+
+.action-menu-language-label {
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.action-menu-language-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.action-menu-lang-btn {
+  min-width: 34px;
+  height: 24px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+}
+
+.action-menu-lang-btn:hover {
+  border-color: var(--accent);
+  color: var(--text-primary);
+}
+
+.action-menu-lang-btn.active {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+  color: var(--text-primary);
+  background: color-mix(in srgb, var(--accent) 10%, var(--bg-primary));
 }
 
 /* ========== Input Area ========== */

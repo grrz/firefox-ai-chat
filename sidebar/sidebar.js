@@ -28,6 +28,8 @@ let persistQueue = Promise.resolve();
 const activeStreams = new Map();
 let shouldAutoScroll = true;
 let clearChatConfirmArmed = false;
+let actionButtonsCompactRaf = null;
+let actionButtonsResizeObserver = null;
 
 // ========== DOM References ==========
 const $ = (sel) => document.querySelector(sel);
@@ -40,7 +42,6 @@ const scrollToBottomBtn = $('#scrollToBottomBtn');
 const userInput = $('#userInput');
 const sendBtn = $('#sendBtn');
 const stopBtn = $('#stopBtn');
-const clearChatBtn = $('#clearChatBtn');
 const settingsBtn = $('#settingsBtn');
 const languageToggleBtn = $('#languageToggleBtn');
 const historyBarEl = $('#historyBar');
@@ -194,6 +195,11 @@ function updateLanguageToggleUI() {
 async function toggleResponseLanguage() {
   const current = getResponseLanguage();
   const next = current === 'en' ? 'ru' : 'en';
+  await setResponseLanguage(next);
+}
+
+async function setResponseLanguage(lang) {
+  const next = lang === 'ru' ? 'ru' : 'en';
   const nextSettings = {
     ...state.settings,
     responseLanguage: next,
@@ -249,21 +255,10 @@ function switchToChat() {
   renderActionBar();
 }
 
-function updateClearChatButton() {
-  if (!clearChatBtn) return;
-  clearChatBtn.classList.toggle('confirming', clearChatConfirmArmed);
-  clearChatBtn.textContent = clearChatConfirmArmed ? 'confirm?' : '×';
-}
-
-function armClearChatConfirm() {
-  clearChatConfirmArmed = true;
-  updateClearChatButton();
-}
-
 function disarmClearChatConfirm() {
   if (!clearChatConfirmArmed) return;
   clearChatConfirmArmed = false;
-  updateClearChatButton();
+  renderActionBar();
 }
 
 function switchToWelcome() {
@@ -310,12 +305,33 @@ function renderActionCards() {
 }
 
 function renderActionBar() {
-  actionBarEl.innerHTML = ACTIONS.map(action => `
+  const actionButtons = ACTIONS.map(action => `
     <button class="action-btn" data-action="${action.id}">
-      ${action.icon}
-      ${action.label}
+      <span class="action-btn-icon">${action.icon}</span>
+      <span class="action-btn-label">${action.label}</span>
     </button>
   `).join('');
+  const clearLabel = clearChatConfirmArmed ? 'Clear chat (confirm?)' : 'Clear chat';
+  const currentLang = getResponseLanguage();
+  actionBarEl.innerHTML = [
+    '<div class="action-buttons-scroll" id="actionButtonsScroll">',
+    actionButtons,
+    '</div>',
+    '<div class="action-menu-wrap" id="actionMenuWrap">',
+    '  <button class="action-menu-toggle" id="actionMenuToggle" title="Menu" aria-label="Menu">⋯</button>',
+    '  <div class="action-menu hidden" id="actionMenu">',
+    `    <button class="action-menu-item${clearChatConfirmArmed ? ' danger' : ''}" id="menuClearChat">${clearLabel}</button>`,
+    '    <div class="action-menu-language">',
+    '      <span class="action-menu-language-label">Language</span>',
+    '      <div class="action-menu-language-switch" role="group" aria-label="Response language">',
+    `        <button class="action-menu-lang-btn${currentLang === 'en' ? ' active' : ''}" id="menuLangEn" data-lang="en">EN</button>`,
+    `        <button class="action-menu-lang-btn${currentLang === 'ru' ? ' active' : ''}" id="menuLangRu" data-lang="ru">RU</button>`,
+    '      </div>',
+    '    </div>',
+    '    <button class="action-menu-item" id="menuOpenSettings">Settings</button>',
+    '  </div>',
+    '</div>',
+  ].join('');
 
   actionBarEl.querySelectorAll('.action-btn').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -323,6 +339,85 @@ function renderActionBar() {
       executeAction(btn.dataset.action);
     });
   });
+
+  const menuEl = $('#actionMenu');
+  $('#actionMenuToggle')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    menuEl?.classList.toggle('hidden');
+  });
+  $('#menuClearChat')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (!clearChatConfirmArmed) {
+      clearChatConfirmArmed = true;
+      renderActionBar();
+      $('#actionMenu')?.classList.remove('hidden');
+      return;
+    }
+    clearChatConfirmArmed = false;
+    switchToWelcome();
+  });
+  const handleMenuLanguageClick = async (e) => {
+    e.stopPropagation();
+    const nextLang = e.currentTarget?.dataset?.lang;
+    if (!nextLang || nextLang === getResponseLanguage()) return;
+    await setResponseLanguage(nextLang);
+    renderActionBar();
+    $('#actionMenu')?.classList.remove('hidden');
+  };
+  $('#menuLangEn')?.addEventListener('click', handleMenuLanguageClick);
+  $('#menuLangRu')?.addEventListener('click', handleMenuLanguageClick);
+  $('#menuOpenSettings')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    browser.runtime.openOptionsPage();
+    menuEl?.classList.add('hidden');
+  });
+
+  bindActionButtonsResizeObserver();
+  scheduleActionButtonsCompactMode();
+}
+
+function updateActionButtonsCompactMode() {
+  const buttonsWrap = $('#actionButtonsScroll');
+  if (!buttonsWrap) return;
+  if (buttonsWrap.clientWidth <= 0) return;
+  const wasCompact = buttonsWrap.classList.contains('compact');
+  buttonsWrap.classList.remove('compact');
+  const overflowPx = buttonsWrap.scrollWidth - buttonsWrap.clientWidth;
+  const COLLAPSE_THRESHOLD_PX = 2;
+  const EXPAND_THRESHOLD_PX = 0;
+  if (wasCompact) {
+    // Stay compact until labels fit without overflow.
+    if (overflowPx > -EXPAND_THRESHOLD_PX) {
+      buttonsWrap.classList.add('compact');
+    }
+    return;
+  }
+  if (overflowPx > COLLAPSE_THRESHOLD_PX) {
+    buttonsWrap.classList.add('compact');
+  }
+}
+
+function scheduleActionButtonsCompactMode() {
+  if (actionButtonsCompactRaf != null) {
+    cancelAnimationFrame(actionButtonsCompactRaf);
+  }
+  actionButtonsCompactRaf = requestAnimationFrame(() => {
+    actionButtonsCompactRaf = null;
+    updateActionButtonsCompactMode();
+  });
+}
+
+function bindActionButtonsResizeObserver() {
+  if (actionButtonsResizeObserver) {
+    actionButtonsResizeObserver.disconnect();
+  }
+  const buttonsWrap = $('#actionButtonsScroll');
+  if (!buttonsWrap || !window.ResizeObserver) return;
+  actionButtonsResizeObserver = new ResizeObserver(() => {
+    scheduleActionButtonsCompactMode();
+  });
+  actionButtonsResizeObserver.observe(buttonsWrap);
+  if (actionBarEl) actionButtonsResizeObserver.observe(actionBarEl);
 }
 
 function executeAction(actionId) {
@@ -869,15 +964,6 @@ function autoResize() {
 function bindEvents() {
   sendBtn.addEventListener('click', handleSend);
   stopBtn.addEventListener('click', abortStreaming);
-  clearChatBtn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    if (!clearChatConfirmArmed) {
-      armClearChatConfirm();
-      return;
-    }
-    disarmClearChatConfirm();
-    switchToWelcome();
-  });
   settingsBtn.addEventListener('click', () => browser.runtime.openOptionsPage());
   languageToggleBtn.addEventListener('click', () => {
     void toggleResponseLanguage();
@@ -888,7 +974,15 @@ function bindEvents() {
   });
   document.addEventListener('click', (e) => {
     if (!historyDropdownEl.contains(e.target)) closeHistoryMenu();
-    if (!clearChatBtn.contains(e.target)) disarmClearChatConfirm();
+    const actionMenuWrap = $('#actionMenuWrap');
+    const actionMenu = $('#actionMenu');
+    const clickedInsideMenu = !!(actionMenuWrap && actionMenuWrap.contains(e.target));
+    if (actionMenu && !clickedInsideMenu) {
+      actionMenu.classList.add('hidden');
+    }
+    if (clearChatConfirmArmed && !clickedInsideMenu) {
+      disarmClearChatConfirm();
+    }
   });
   messagesEl.addEventListener('scroll', handleMessagesScroll);
   scrollToBottomBtn.addEventListener('click', () => {
@@ -904,12 +998,16 @@ function bindEvents() {
   });
 
   userInput.addEventListener('input', autoResize);
+  window.addEventListener('resize', () => {
+    if (state.mode === 'chat') scheduleActionButtonsCompactMode();
+  });
 
   // Live settings updates
   browser.storage.onChanged.addListener((changes, area) => {
     if (area === 'sync' && changes.settings) {
       state.settings = changes.settings.newValue;
       updateLanguageToggleUI();
+      if (state.mode === 'chat') renderActionBar();
     }
   });
 
@@ -943,7 +1041,6 @@ function bindEvents() {
     tabStates.delete(tabId);
   });
 
-  updateClearChatButton();
 }
 
 // ========== Start ==========
