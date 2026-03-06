@@ -386,7 +386,89 @@
   }
 
   function buildTextContent(data) {
+    return buildTextContentWithSources(data).textContent;
+  }
+
+  function normalizeTextForMatch(text) {
+    return String(text || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  }
+
+  function toSelector(el) {
+    if (!el || el.nodeType !== Node.ELEMENT_NODE) return '';
+    const parts = [];
+    let node = el;
+    while (node && node.nodeType === Node.ELEMENT_NODE && node !== document.body) {
+      const tag = node.tagName.toLowerCase();
+      if (node.id) {
+        const escapedId = window.CSS?.escape ? window.CSS.escape(node.id) : node.id.replace(/[^a-zA-Z0-9\-_:.]/g, '\\$&');
+        parts.unshift(`${tag}#${escapedId}`);
+        break;
+      }
+      let idx = 1;
+      let sib = node.previousElementSibling;
+      while (sib) {
+        if (sib.tagName === node.tagName) idx += 1;
+        sib = sib.previousElementSibling;
+      }
+      parts.unshift(`${tag}:nth-of-type(${idx})`);
+      node = node.parentElement;
+    }
+    if (parts.length === 0) return 'body';
+    return `body > ${parts.join(' > ')}`;
+  }
+
+  function createMatcher(root, selector, pickText) {
+    const elements = Array.from(root.querySelectorAll(selector));
+    const exact = new Map();
+    for (const el of elements) {
+      const key = normalizeTextForMatch(pickText(el));
+      if (!key) continue;
+      if (!exact.has(key)) exact.set(key, el);
+    }
+    return (targetText) => {
+      const normalized = normalizeTextForMatch(targetText);
+      if (!normalized) return null;
+      const direct = exact.get(normalized);
+      if (direct) return direct;
+      for (const el of elements) {
+        const text = normalizeTextForMatch(pickText(el));
+        if (!text) continue;
+        if (text.includes(normalized) || normalized.includes(text)) return el;
+      }
+      return null;
+    };
+  }
+
+  function buildTextContentWithSources(data, options = {}) {
     const lines = [];
+    const sourceAnchors = {};
+    const liveRoot = options.liveRoot && options.liveRoot.querySelectorAll ? options.liveRoot : document.body;
+    const matchers = {
+      heading: createMatcher(liveRoot, 'h1, h2, h3, h4, h5, h6', (el) => el.textContent || ''),
+      paragraph: createMatcher(liveRoot, 'p, blockquote', (el) => el.textContent || ''),
+      listItem: createMatcher(liveRoot, 'li', (el) => el.textContent || ''),
+      tableRow: createMatcher(liveRoot, 'tr', (el) => Array.from(el.querySelectorAll('th,td')).map((td) => td.textContent.trim()).join(' | ')),
+      code: createMatcher(liveRoot, 'pre, code', (el) => el.textContent || ''),
+      image: createMatcher(liveRoot, 'img[alt]', (el) => el.getAttribute('alt') || ''),
+      link: createMatcher(liveRoot, 'a[href]', (el) => `${el.textContent || ''} ${el.getAttribute('href') || ''}`),
+    };
+    let sourceSeq = 0;
+
+    function sourceTag(type, text, fallback = '') {
+      const finder = matchers[type];
+      if (!finder || !text) return '';
+      const el = finder(text) || (fallback ? finder(fallback) : null);
+      if (!el) return '';
+      const selector = toSelector(el);
+      if (!selector) return '';
+      sourceSeq += 1;
+      const sourceId = `s${sourceSeq}`;
+      sourceAnchors[sourceId] = {
+        selector,
+        snippet: String(text).replace(/\s+/g, ' ').trim().slice(0, 220),
+      };
+      return ` [${sourceId}]`;
+    }
 
     lines.push(`# ${data.title}`);
     lines.push(`URL: ${data.url}`);
@@ -394,19 +476,19 @@
     lines.push('');
 
     for (const h of data.headings) {
-      lines.push(`${'#'.repeat(h.level)} ${h.text}`);
+      lines.push(`${'#'.repeat(h.level)} ${h.text}${sourceTag('heading', h.text)}`);
     }
     if (data.headings.length > 0) lines.push('');
 
     for (const p of data.paragraphs) {
-      lines.push(p);
+      lines.push(`${p}${sourceTag('paragraph', p)}`);
       lines.push('');
     }
 
     if (data.lists.length > 0) {
       for (const list of data.lists) {
         for (const item of list.items) {
-          lines.push(`- ${item}`);
+          lines.push(`- ${item}${sourceTag('listItem', item)}`);
         }
         lines.push('');
       }
@@ -415,7 +497,8 @@
     if (data.tables.length > 0) {
       for (const table of data.tables) {
         for (const row of table) {
-          lines.push(`| ${row.join(' | ')} |`);
+          const rowText = row.join(' | ');
+          lines.push(`| ${rowText} |${sourceTag('tableRow', rowText)}`);
         }
         lines.push('');
       }
@@ -423,6 +506,8 @@
 
     if (data.codeBlocks.length > 0) {
       for (const block of data.codeBlocks) {
+        const tag = sourceTag('code', block);
+        if (tag) lines.push(`Source${tag}`);
         lines.push('```');
         lines.push(block);
         lines.push('```');
@@ -434,7 +519,7 @@
       lines.push('Images:');
       for (const img of data.images) {
         const cap = img.caption ? ` (${img.caption})` : '';
-        lines.push(`- [${img.alt}]${cap}`);
+        lines.push(`- [${img.alt}]${cap}${sourceTag('image', img.alt)}`);
       }
       lines.push('');
     }
@@ -442,7 +527,7 @@
     if (data.links.length > 0) {
       lines.push('Links:');
       for (const link of data.links.slice(0, 30)) {
-        lines.push(`- [${link.text}](${link.href})`);
+        lines.push(`- [${link.text}](${link.href})${sourceTag('link', `${link.text} ${link.href}`)}`);
       }
     }
 
@@ -456,7 +541,10 @@
       }
     }
 
-    return lines.join('\n');
+    return {
+      textContent: lines.join('\n'),
+      sourceAnchors,
+    };
   }
 
   // ── YouTube-specific extraction ──────────────────────────────────────
@@ -561,11 +649,13 @@
 
     // DOM fallbacks
     if (!meta.title) {
-      meta.title = document.querySelector('h1.ytd-watch-metadata yt-formatted-string')?.textContent?.trim() ||
+      meta.title = document.querySelector('h1[class*="watch-metadata"] [id="title"]')?.textContent?.trim() ||
+        document.querySelector('h1[class*="watch-metadata"] [class*="formatted-string"]')?.textContent?.trim() ||
         document.title.replace(/ - YouTube$/, '') || '';
     }
     if (!meta.channel) {
-      meta.channel = document.querySelector('ytd-channel-name yt-formatted-string a')?.textContent?.trim() || '';
+      meta.channel = document.querySelector('[class*="channel-name"] [id="text"] a')?.textContent?.trim() ||
+        document.querySelector('[class*="channel-name"] [class*="formatted-string"] a')?.textContent?.trim() || '';
     }
     if (!meta.videoId) {
       meta.videoId = new URLSearchParams(location.search).get('v') || '';
@@ -582,9 +672,12 @@
 
     // DOM fallback
     try {
-      const expander = document.querySelector('ytd-text-inline-expander #plain-snippet-text') ||
-        document.querySelector('ytd-text-inline-expander .snippet-text') ||
-        document.querySelector('#description-inline-expander yt-attributed-string');
+      const expander = document.querySelector('[id="plain-snippet-text"]') ||
+        document.querySelector('.snippet-text') ||
+        document.querySelector('#description-inline-expander [id="description-text"]') ||
+        document.querySelector('[class*="text-inline-expander"] #plain-snippet-text') ||
+        document.querySelector('[class*="text-inline-expander"] .snippet-text') ||
+        document.querySelector('#description-inline-expander [class*="attributed-string"]');
       if (expander) return expander.textContent.trim();
     } catch {}
 
@@ -658,10 +751,10 @@
 
   function resolveClickable(el) {
     if (!el) return null;
-    if (el.matches('button, [role="button"], tp-yt-paper-item')) return el;
-    const child = el.querySelector?.('button, [role="button"], tp-yt-paper-item, yt-button-shape button');
+    if (el.matches('button, [role="button"], [class*="paper-item"]')) return el;
+    const child = el.querySelector?.('button, [role="button"], [class*="paper-item"], [class*="button-shape"] button');
     if (child) return child;
-    const parent = el.closest?.('button, [role="button"], tp-yt-paper-item');
+    const parent = el.closest?.('button, [role="button"], [class*="paper-item"]');
     return parent || el;
   }
 
@@ -677,7 +770,7 @@
   }
 
   function findVisibleShowMoreButton() {
-    const candidates = Array.from(document.querySelectorAll('button, tp-yt-paper-button, ytd-button-renderer'));
+    const candidates = Array.from(document.querySelectorAll('button, [class*="paper-button"], [class*="button-renderer"]'));
     return candidates.find((el) => {
       if (!isVisible(el)) return false;
       const text = (el.textContent || '').trim().toLowerCase();
@@ -685,7 +778,7 @@
       const title = (el.getAttribute('title') || '').trim().toLowerCase();
       // Expanders in the watch details/description area.
       if (text !== 'show more' && aria !== 'show more' && title !== 'show more') return false;
-      return !!el.closest('ytd-watch-metadata, ytd-text-inline-expander-renderer, #description');
+      return !!el.closest('[id="description"], [id="watch-metadata"], [class*="expander-renderer"]');
     });
   }
 
@@ -693,10 +786,10 @@
     try {
       const selectors = [
         'button',
-        'tp-yt-paper-button',
-        'ytd-button-renderer',
-        'tp-yt-paper-item',
-        'ytd-menu-service-item-renderer',
+        '[class*="paper-button"]',
+        '[class*="button-renderer"]',
+        '[class*="paper-item"]',
+        '[class*="menu-service-item-renderer"]',
       ];
       const all = Array.from(document.querySelectorAll(selectors.join(',')));
       const matches = all
@@ -720,9 +813,9 @@
     const WORD_LIMIT = 10000;
 
     // Variant A: classic segment renderer rows.
-    const segmentNodes = document.querySelectorAll('ytd-transcript-segment-renderer');
+    const segmentNodes = document.querySelectorAll('[class*="transcript-segment-renderer"]');
     for (const seg of segmentNodes) {
-      const textEl = seg.querySelector('.segment-text, #segment-text, [class*="segment-text"], yt-formatted-string');
+      const textEl = seg.querySelector('.segment-text, #segment-text, [class*="segment-text"], [id="message"], [id="text"], [class*="formatted-string"]');
       const text = textEl?.textContent?.trim() || '';
       if (!text) continue;
 
@@ -734,9 +827,9 @@
     // Variant B: parse transcript panel text as timestamp/text pairs.
     if (!lines.length) {
       const panel =
-        document.querySelector('ytd-engagement-panel-section-list-renderer[target-id*="transcript"]') ||
-        document.querySelector('ytd-transcript-search-panel-renderer') ||
-        document.querySelector('ytd-transcript-renderer');
+        document.querySelector('[target-id*="transcript"]') ||
+        document.querySelector('[class*="transcript-search-panel-renderer"]') ||
+        document.querySelector('[class*="transcript-renderer"]');
 
       const panelText = panel?.textContent?.replace(/\u00a0/g, ' ').trim() || '';
       if (panelText) {
@@ -759,22 +852,21 @@
     if (!lines.length) return null;
 
     const lang =
-      document.querySelector('ytd-transcript-header-renderer #language-menu .yt-core-attributed-string')?.textContent?.trim() ||
-      document.querySelector('ytd-transcript-header-renderer #title')?.textContent?.trim() ||
-      'YouTube transcript';
+      document.querySelector('[class*="transcript-header-renderer"] #language-menu .yt-core-attributed-string') ||
+      document.querySelector('[class*="transcript-header-renderer"] #title');
 
-    return { language: lang, lines };
+    return { language: lang?.textContent?.trim() || 'YouTube transcript', lines };
   }
 
   async function tryOpenTranscriptPanel() {
     // If already rendered, no need to click anything.
-    if (document.querySelector('ytd-transcript-segment-renderer')) return;
+    if (document.querySelector('[class*="transcript-segment-renderer"]')) return;
 
     logTranscriptCandidates();
 
     // Score transcript-related controls and try a few best candidates.
     const candidates = Array.from(
-      document.querySelectorAll('button, tp-yt-paper-button, ytd-button-renderer, tp-yt-paper-item, ytd-menu-service-item-renderer')
+      document.querySelectorAll('button, [class*="paper-button"], [class*="button-renderer"], [class*="paper-item"], [class*="menu-service-item-renderer"]')
     )
       .map((el) => {
         const label = getElementLabel(el);
@@ -806,9 +898,9 @@
         await sleep(900);
 
         const panelVisible = !!document.querySelector(
-          'ytd-engagement-panel-section-list-renderer[target-id*="transcript"], ytd-transcript-renderer, ytd-transcript-search-panel-renderer'
+          '[target-id*="transcript"], [class*="transcript-renderer"], [class*="transcript-search-panel-renderer"]'
         );
-        const segCount = document.querySelectorAll('ytd-transcript-segment-renderer').length;
+        const segCount = document.querySelectorAll('[class*="transcript-segment-renderer"]').length;
         if (panelVisible || segCount > 0) return;
       }
     }
@@ -821,7 +913,7 @@
       logTranscriptCandidates();
 
       const retryCandidates = Array.from(
-        document.querySelectorAll('button, tp-yt-paper-button, ytd-button-renderer, tp-yt-paper-item, ytd-menu-service-item-renderer')
+        document.querySelectorAll('button, [class*="paper-button"], [class*="button-renderer"], [class*="paper-item"], [class*="menu-service-item-renderer"]')
       )
         .map((el) => {
           const label = getElementLabel(el);
@@ -847,9 +939,9 @@
         clickElement(target);
         await sleep(900);
         const panelVisible = !!document.querySelector(
-          'ytd-engagement-panel-section-list-renderer[target-id*="transcript"], ytd-transcript-renderer, ytd-transcript-search-panel-renderer'
+          '[class*="engagement-panel-section-list-renderer"][target-id*="transcript"], [class*="transcript-renderer"], [class*="transcript-search-panel-renderer"]'
         );
-        const segCount = document.querySelectorAll('ytd-transcript-segment-renderer').length;
+        const segCount = document.querySelectorAll('[class*="transcript-segment-renderer"]').length;
         if (panelVisible || segCount > 0) return;
       }
     }
@@ -1004,7 +1096,7 @@
   function extractYouTubeComments() {
     const comments = [];
     try {
-      const threads = document.querySelectorAll('ytd-comment-thread-renderer');
+      const threads = document.querySelectorAll('[class*="comment-thread-renderer"]');
       for (const thread of threads) {
         if (comments.length >= 30) break;
         const authorEl = thread.querySelector('#author-text span');
@@ -1134,7 +1226,9 @@
       comments: extractComments(),
     };
 
-    const textContent = buildTextContent(data);
+    const liveRoot = findMainContent(document.body);
+    const built = buildTextContentWithSources(data, { liveRoot });
+    const textContent = built.textContent;
     const wordCount = textContent.split(/\s+/).filter(Boolean).length;
 
     return {
@@ -1143,6 +1237,7 @@
       description,
       textContent,
       wordCount,
+      sourceAnchors: built.sourceAnchors || {},
       contextLimits: {
         applied: limits.length > 0,
         details: limits,
@@ -1161,6 +1256,77 @@
         wordCount: 0,
         error: err.message,
       }));
+    }
+    if (message.type === 'scrollToSource') {
+      const selector = String(message.selector || '');
+      const snippet = String(message.snippet || '').trim();
+      if (!selector && !snippet) return { ok: false, error: 'missing selector/snippet' };
+      let el = null;
+      if (selector) {
+        try {
+          el = document.querySelector(selector);
+        } catch {
+          // fall through to snippet lookup
+        }
+      }
+      if (!el && snippet) {
+        const root = findMainContent(document.body);
+        const target = snippet.replace(/\s+/g, ' ').trim().toLowerCase();
+        const targetWords = target.split(/\s+/).filter((w) => w.length >= 4);
+        const scoreCandidate = (candidateText) => {
+          const text = candidateText.replace(/\s+/g, ' ').trim().toLowerCase();
+          if (!text) return -1;
+          if (text === target) return 1000;
+          if (text.includes(target) && target.length >= 24) return 900;
+          if (target.includes(text) && text.length >= 24) return 700;
+          if (target.length < 8) return -1;
+          let overlap = 0;
+          for (const w of targetWords) {
+            if (text.includes(w)) overlap += 1;
+          }
+          if (overlap === 0) return -1;
+          const ratio = overlap / Math.max(1, targetWords.length);
+          const lenPenalty = Math.abs(text.length - target.length) / Math.max(target.length, 1);
+          return Math.round(ratio * 500 - lenPenalty * 80);
+        };
+        const candidates = Array.from(root.querySelectorAll('h1,h2,h3,h4,h5,h6,p,blockquote,li,tr,pre,code,a,img'));
+        let best = null;
+        let bestScore = -1;
+        for (const node of candidates) {
+          const raw = node.tagName === 'IMG'
+            ? (node.getAttribute('alt') || '')
+            : (node.textContent || '');
+          const score = scoreCandidate(raw);
+          if (score > bestScore) {
+            bestScore = score;
+            best = node;
+          }
+        }
+        if (best && bestScore >= 120) {
+          el = best;
+        }
+      }
+      if (!el) return { ok: false, error: 'not found' };
+      try {
+        const rect = el.getBoundingClientRect();
+        const targetTop = Math.max(0, rect.top + window.scrollY - Math.round(window.innerHeight * 0.35));
+        window.scrollTo({ top: targetTop, behavior: 'smooth' });
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        const prevOutline = el.style.outline;
+        const prevOffset = el.style.outlineOffset;
+        const prevTransition = el.style.transition;
+        el.style.outline = '2px solid #f59e0b';
+        el.style.outlineOffset = '2px';
+        el.style.transition = 'outline 0.2s ease';
+        setTimeout(() => {
+          el.style.outline = prevOutline;
+          el.style.outlineOffset = prevOffset;
+          el.style.transition = prevTransition;
+        }, 1800);
+        return { ok: true };
+      } catch (err) {
+        return { ok: false, error: err?.message || 'scroll failed' };
+      }
     }
   });
 })();

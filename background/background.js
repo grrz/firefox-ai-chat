@@ -32,6 +32,11 @@ function buildChatMessages(messages, pageContext, settings) {
   systemContent += `\nDo not switch to another language even if the user writes in another language.`;
   systemContent += `\nIf source content is in another language, translate or summarize it into ${selectedLanguage}.`;
   systemContent += '\nShort quotes may stay in the original language, but all explanations must remain in the required language.';
+  if (pageContext?.sourceAnchors && Object.keys(pageContext.sourceAnchors).length > 0) {
+    systemContent += '\n\nSource tags are provided in the page context as [sN].';
+    systemContent += '\nFor each meaningful claim or list item, append one or more relevant tags like [s12] or [s12, s18].';
+    systemContent += '\nOnly use source tags that exist in the context; never invent tags.';
+  }
   if (pageContext?.textContent) {
     systemContent += `\n\n--- PAGE CONTEXT ---\n${pageContext.textContent}\n--- END PAGE CONTEXT ---`;
   }
@@ -201,6 +206,7 @@ async function getDistilledContentForActiveTab() {
     description: topFrame.data.description || '',
     textContent,
     wordCount,
+    sourceAnchors: topFrame.data.sourceAnchors || {},
     contextLimits,
   };
 }
@@ -314,6 +320,20 @@ browser.runtime.onMessage.addListener(async (message) => {
 
   if (message.type === 'getSettings') {
     return loadSettings();
+  }
+
+  if (message.type === 'scrollToSource') {
+    try {
+      const tabs = await browser.tabs.query({ active: true, currentWindow: true });
+      if (!tabs[0]?.id) return { ok: false, error: 'No active tab' };
+      return await browser.tabs.sendMessage(
+        tabs[0].id,
+        { type: 'scrollToSource', selector: message.selector, snippet: message.snippet || '' },
+        { frameId: 0 }
+      );
+    } catch (err) {
+      return { ok: false, error: err?.message || 'Scroll message failed' };
+    }
   }
 
   // Proxy fetch for content scripts (background has host_permissions)

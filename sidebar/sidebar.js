@@ -541,6 +541,87 @@ function escapeHtml(text) {
   return div.innerHTML;
 }
 
+function getSourceAnchorsMap() {
+  const map = state.pageContext?.sourceAnchors;
+  if (!map || typeof map !== 'object') return {};
+  return map;
+}
+
+function linkifySourceTags(text) {
+  if (!text) return text;
+  const anchors = getSourceAnchorsMap();
+  if (Object.keys(anchors).length === 0) return text;
+  return String(text).replace(/\[(s\d+(?:\s*-\s*s?\d+)?(?:\s*,\s*s?\d+(?:\s*-\s*s?\d+)?)*)]/gi, (match, group) => {
+    const parts = [];
+    const tokens = group
+      .split(',')
+      .map((x) => x.trim().toLowerCase())
+      .filter(Boolean);
+    for (const token of tokens) {
+      const rangeMatch = token.match(/^s(\d+)\s*-\s*s?(\d+)$/i);
+      if (rangeMatch) {
+        const start = Number(rangeMatch[1]);
+        const end = Number(rangeMatch[2]);
+        if (!Number.isFinite(start) || !Number.isFinite(end)) continue;
+        const lo = Math.min(start, end);
+        const hi = Math.max(start, end);
+        const cap = Math.min(hi, lo + 50); // safety bound
+        const ids = [];
+        for (let i = lo; i <= cap; i++) ids.push(`s${i}`);
+        const hasAny = ids.some((id) => !!anchors[id]);
+        if (hasAny) {
+          const label = `s${lo}-s${hi}`;
+          parts.push(`[→](source-group:${label})`);
+        }
+        continue;
+      }
+      const singleMatch = token.match(/^s(\d+)$/i);
+      if (singleMatch) {
+        const id = `s${Number(singleMatch[1])}`;
+        if (anchors[id]) parts.push(`[→](source:${id})`);
+      }
+    }
+    if (parts.length === 0) return '';
+    return parts.join(' ');
+  });
+}
+
+async function scrollToSourceFromChat(sourceId) {
+  const id = String(sourceId || '').trim().toLowerCase();
+  if (!id) return;
+  const anchor = getSourceAnchorsMap()[id];
+  if (!anchor?.selector) return;
+  try {
+    await browser.runtime.sendMessage({
+      type: 'scrollToSource',
+      selector: anchor.selector,
+      snippet: anchor.snippet || '',
+    });
+  } catch {
+    // Ignore scroll failures; links remain best-effort.
+  }
+}
+
+async function scrollToSourceGroupFromChat(label) {
+  const normalized = String(label || '').trim().toLowerCase();
+  const match = normalized.match(/^s(\d+)-s?(\d+)$/i);
+  if (!match) return;
+  const start = Number(match[1]);
+  const end = Number(match[2]);
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return;
+  const lo = Math.min(start, end);
+  const hi = Math.max(start, end);
+  const cap = Math.min(hi, lo + 50);
+  const anchors = getSourceAnchorsMap();
+  for (let i = lo; i <= cap; i++) {
+    const id = `s${i}`;
+    if (anchors[id]?.selector) {
+      await scrollToSourceFromChat(id);
+      return;
+    }
+  }
+}
+
 function renderMessage(message, index) {
   const el = document.createElement('div');
   el.className = `message message-${message.role}`;
@@ -563,7 +644,7 @@ function renderMessage(message, index) {
       bubble.textContent = message.content;
     }
   } else if (message.role === 'assistant') {
-    bubble.innerHTML = renderMarkdown(message.content);
+    bubble.innerHTML = renderMarkdown(linkifySourceTags(message.content));
   } else if (message.role === 'notice') {
     bubble.innerHTML = renderContextLimitNotice(message.details || []);
   } else if (message.role === 'error') {
@@ -750,7 +831,7 @@ function renderStreamingBubble(rawText, apiThinking, { partial = true } = {}) {
       : buildThinkingHtml(thinkingText, { streaming: false, elapsed: timing.elapsed || 0 });
   }
   if (contentText) {
-    html += render(contentText);
+    html += render(linkifySourceTags(contentText));
   }
   return html;
 }
@@ -985,6 +1066,21 @@ function bindEvents() {
     }
   });
   messagesEl.addEventListener('scroll', handleMessagesScroll);
+  messagesEl.addEventListener('click', (e) => {
+    const link = e.target?.closest?.('a[href^="source:"]');
+    const groupLink = e.target?.closest?.('a[href^="source-group:"]');
+    const targetLink = link || groupLink;
+    if (!targetLink) return;
+    e.preventDefault();
+    const href = targetLink.getAttribute('href') || '';
+    if (href.startsWith('source-group:')) {
+      const groupLabel = href.replace(/^source-group:/i, '');
+      void scrollToSourceGroupFromChat(groupLabel);
+      return;
+    }
+    const sourceId = href.replace(/^source:/i, '');
+    void scrollToSourceFromChat(sourceId);
+  });
   scrollToBottomBtn.addEventListener('click', () => {
     shouldAutoScroll = true;
     scrollToBottom(true);

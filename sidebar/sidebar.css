@@ -553,6 +553,24 @@ body {
   text-decoration: underline;
 }
 
+.message-assistant .message-bubble a[href^="source:"],
+.message-assistant .message-bubble a[href^="source-group:"] {
+  display: inline;
+  padding: 0;
+  margin-left: 2px;
+  border: none;
+  border-radius: 0;
+  font-size: 11px;
+  line-height: 1.4;
+  text-decoration: none;
+}
+
+.message-assistant .message-bubble a[href^="source:"]:hover,
+.message-assistant .message-bubble a[href^="source-group:"]:hover {
+  background: transparent;
+  text-decoration: none;
+}
+
 .message-assistant .message-bubble table {
   border-collapse: collapse;
   margin: 8px 0;
