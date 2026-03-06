@@ -27,6 +27,7 @@ let persistQueue = Promise.resolve();
 // Keyed by tabId → { port, streamedText, streamedThinking, thinkingStartTime, thinkingElapsed, tabId }
 const activeStreams = new Map();
 let shouldAutoScroll = true;
+let clearChatConfirmArmed = false;
 
 // ========== DOM References ==========
 const $ = (sel) => document.querySelector(sel);
@@ -39,7 +40,7 @@ const scrollToBottomBtn = $('#scrollToBottomBtn');
 const userInput = $('#userInput');
 const sendBtn = $('#sendBtn');
 const stopBtn = $('#stopBtn');
-const newChatBtn = $('#newChatBtn');
+const clearChatBtn = $('#clearChatBtn');
 const settingsBtn = $('#settingsBtn');
 const languageToggleBtn = $('#languageToggleBtn');
 const historyBarEl = $('#historyBar');
@@ -248,6 +249,23 @@ function switchToChat() {
   renderActionBar();
 }
 
+function updateClearChatButton() {
+  if (!clearChatBtn) return;
+  clearChatBtn.classList.toggle('confirming', clearChatConfirmArmed);
+  clearChatBtn.textContent = clearChatConfirmArmed ? 'confirm?' : '×';
+}
+
+function armClearChatConfirm() {
+  clearChatConfirmArmed = true;
+  updateClearChatButton();
+}
+
+function disarmClearChatConfirm() {
+  if (!clearChatConfirmArmed) return;
+  clearChatConfirmArmed = false;
+  updateClearChatButton();
+}
+
 function switchToWelcome() {
   // Abort stream for current tab if any
   const stream = activeStreams.get(state.currentTabId);
@@ -255,6 +273,7 @@ function switchToWelcome() {
     stream.port?.postMessage({ type: 'abort' });
   }
 
+  disarmClearChatConfirm();
   state.mode = 'welcome';
   state.messages = [];
   closeHistoryMenu();
@@ -381,16 +400,18 @@ function updateHistoryDropdownUI() {
   const shouldShow = state.mode === 'chat' && entries.length > 1;
   if (!shouldShow) {
     historyBarEl.classList.add('hidden');
+    chatState.classList.remove('history-visible');
     closeHistoryMenu();
     return;
   }
 
   historyBarEl.classList.remove('hidden');
+  chatState.classList.add('history-visible');
   historyDropdownEl.classList.toggle('menu-closed', historyMenuEl.classList.contains('hidden'));
 
   const activeEntry = getActiveHistoryEntry(entries) || entries[entries.length - 1];
   historyToggleBtn.innerHTML = [
-    activeEntry.iconHtml,
+    `<span class="history-toggle-icon">${activeEntry.iconHtml}</span>`,
     `<span class="history-label">${escapeHtml(activeEntry.label)}</span>`,
     '<span class="history-toggle-chevron" aria-hidden="true"><svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></span>',
   ].join('');
@@ -848,7 +869,15 @@ function autoResize() {
 function bindEvents() {
   sendBtn.addEventListener('click', handleSend);
   stopBtn.addEventListener('click', abortStreaming);
-  newChatBtn.addEventListener('click', switchToWelcome);
+  clearChatBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (!clearChatConfirmArmed) {
+      armClearChatConfirm();
+      return;
+    }
+    disarmClearChatConfirm();
+    switchToWelcome();
+  });
   settingsBtn.addEventListener('click', () => browser.runtime.openOptionsPage());
   languageToggleBtn.addEventListener('click', () => {
     void toggleResponseLanguage();
@@ -859,6 +888,7 @@ function bindEvents() {
   });
   document.addEventListener('click', (e) => {
     if (!historyDropdownEl.contains(e.target)) closeHistoryMenu();
+    if (!clearChatBtn.contains(e.target)) disarmClearChatConfirm();
   });
   messagesEl.addEventListener('scroll', handleMessagesScroll);
   scrollToBottomBtn.addEventListener('click', () => {
@@ -893,6 +923,7 @@ function bindEvents() {
     if (tabId === state.currentTabId && changeInfo.status === 'complete') {
       const nextPageKey = normalizePageUrl(tab?.url);
       if (nextPageKey !== state.currentPageKey) {
+        disarmClearChatConfirm();
         saveTabState();
         state.currentPageKey = nextPageKey;
         void restoreTabState(tabId);
@@ -911,6 +942,8 @@ function bindEvents() {
     }
     tabStates.delete(tabId);
   });
+
+  updateClearChatButton();
 }
 
 // ========== Start ==========
