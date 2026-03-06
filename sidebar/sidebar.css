@@ -63,28 +63,27 @@ body {
   font-size: 15px;
 }
 
-.header-title-wrap {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  align-items: center;
+.history-bar {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-primary);
 }
 
 .history-dropdown {
   position: relative;
-  max-width: 100%;
+  width: 100%;
 }
 
 .history-toggle-btn {
-  max-width: 220px;
+  width: 100%;
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 10px;
+  padding: 6px 10px;
   border: 1px solid var(--border-color);
   border-radius: 8px;
-  background: var(--bg-secondary);
-  color: var(--text-primary);
+  background: var(--user-msg-bg);
+  color: var(--user-msg-text);
   font-size: 13px;
   cursor: pointer;
 }
@@ -97,14 +96,28 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  min-width: 0;
+}
+
+.history-toggle-chevron {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: transform 0.15s ease;
+}
+
+.history-dropdown:not(.menu-closed) .history-toggle-chevron {
+  transform: rotate(180deg);
 }
 
 .history-menu {
   position: absolute;
   left: 0;
   top: calc(100% + 6px);
+  width: 100%;
   min-width: 220px;
-  max-width: 280px;
   max-height: 280px;
   overflow-y: auto;
   background: var(--bg-primary);
@@ -133,6 +146,11 @@ body {
   background: var(--bg-secondary);
 }
 
+.history-menu-item.active {
+  background: color-mix(in srgb, var(--accent) 18%, var(--bg-primary));
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--bg-primary));
+}
+
 .history-item-icon {
   width: 14px;
   height: 14px;
@@ -150,7 +168,6 @@ body {
   display: flex;
   align-items: center;
   gap: 4px;
-  margin-left: 8px;
 }
 
 .lang-toggle-btn {

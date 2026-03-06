@@ -42,7 +42,7 @@ const stopBtn = $('#stopBtn');
 const newChatBtn = $('#newChatBtn');
 const settingsBtn = $('#settingsBtn');
 const languageToggleBtn = $('#languageToggleBtn');
-const headerTitleEl = $('#headerTitle');
+const historyBarEl = $('#historyBar');
 const historyDropdownEl = $('#historyDropdown');
 const historyToggleBtn = $('#historyToggleBtn');
 const historyMenuEl = $('#historyMenu');
@@ -269,6 +269,7 @@ function switchToWelcome() {
   sendBtn.classList.remove('hidden');
   stopBtn.classList.add('hidden');
   updatePageInfo();
+  updateHistoryDropdownUI();
   if (state.currentTabId != null) {
     tabStates.delete(state.currentTabId);
   }
@@ -342,26 +343,61 @@ function getHistoryEntries() {
 
 function closeHistoryMenu() {
   historyMenuEl.classList.add('hidden');
+  historyDropdownEl.classList.add('menu-closed');
+}
+
+function toggleHistoryMenu() {
+  historyMenuEl.classList.toggle('hidden');
+  historyDropdownEl.classList.toggle('menu-closed', historyMenuEl.classList.contains('hidden'));
+}
+
+function getVisibleMessageAnchorIndex() {
+  const viewportTop = messagesEl.scrollTop;
+  const viewportProbe = viewportTop + Math.max(8, Math.floor(messagesEl.clientHeight * 0.25));
+  const messageNodes = messagesEl.querySelectorAll('.message');
+  for (const el of messageNodes) {
+    const top = el.offsetTop;
+    const bottom = top + el.offsetHeight;
+    if (bottom >= viewportProbe) {
+      return Number(el.dataset.index);
+    }
+  }
+  return state.messages.length - 1;
+}
+
+function getActiveHistoryEntry(entries) {
+  if (!entries.length) return null;
+  const anchorIndex = getVisibleMessageAnchorIndex();
+  let candidate = entries[0];
+  for (const entry of entries) {
+    if (entry.messageIndex <= anchorIndex) candidate = entry;
+    else break;
+  }
+  return candidate;
 }
 
 function updateHistoryDropdownUI() {
   const entries = getHistoryEntries();
-  if (entries.length === 0) {
-    headerTitleEl.classList.remove('hidden');
-    historyDropdownEl.classList.add('hidden');
+  const shouldShow = state.mode === 'chat' && entries.length > 1;
+  if (!shouldShow) {
+    historyBarEl.classList.add('hidden');
     closeHistoryMenu();
     return;
   }
 
-  headerTitleEl.classList.add('hidden');
-  historyDropdownEl.classList.remove('hidden');
+  historyBarEl.classList.remove('hidden');
+  historyDropdownEl.classList.toggle('menu-closed', historyMenuEl.classList.contains('hidden'));
 
-  const latest = entries[entries.length - 1];
-  historyToggleBtn.innerHTML = `${latest.iconHtml}<span class="history-label">${escapeHtml(latest.label)}</span>`;
+  const activeEntry = getActiveHistoryEntry(entries) || entries[entries.length - 1];
+  historyToggleBtn.innerHTML = [
+    activeEntry.iconHtml,
+    `<span class="history-label">${escapeHtml(activeEntry.label)}</span>`,
+    '<span class="history-toggle-chevron" aria-hidden="true"><svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></span>',
+  ].join('');
 
   historyMenuEl.innerHTML = entries
       .map((entry) => (
-          `<button class="history-menu-item" data-message-index="${entry.messageIndex}">` +
+          `<button class="history-menu-item${entry.messageIndex === activeEntry.messageIndex ? ' active' : ''}" data-message-index="${entry.messageIndex}"${entry.messageIndex === activeEntry.messageIndex ? ' aria-current="true"' : ''}>` +
           `<span class="history-item-icon">${entry.iconHtml}</span>` +
           `<span class="history-item-label">${escapeHtml(entry.label)}</span>` +
           '</button>'
@@ -475,6 +511,7 @@ function updateScrollToBottomButton() {
 function handleMessagesScroll() {
   shouldAutoScroll = isNearBottom();
   updateScrollToBottomButton();
+  updateHistoryDropdownUI();
 }
 
 function scrollToBottom(force = false) {
@@ -818,7 +855,7 @@ function bindEvents() {
   });
   historyToggleBtn.addEventListener('click', (e) => {
     e.stopPropagation();
-    historyMenuEl.classList.toggle('hidden');
+    toggleHistoryMenu();
   });
   document.addEventListener('click', (e) => {
     if (!historyDropdownEl.contains(e.target)) closeHistoryMenu();
