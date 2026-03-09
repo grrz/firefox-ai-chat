@@ -14,6 +14,7 @@ const state = {
   mode: 'welcome', // 'welcome' | 'chat'
   messages: [],     // {role: 'user'|'assistant'|'notice', content: string}
   pageContext: null,
+  technicalAnalysisMode: false,
   settings: null,
   currentTabId: null,
   currentPageKey: null,
@@ -43,6 +44,8 @@ const scrollToBottomBtn = $('#scrollToBottomBtn');
 const userInput = $('#userInput');
 const sendBtn = $('#sendBtn');
 const stopBtn = $('#stopBtn');
+const techModeIndicator = $('#techModeIndicator');
+const welcomeTechToggleBtn = $('#welcomeTechToggleBtn');
 const settingsBtn = $('#settingsBtn');
 const languageToggleBtn = $('#languageToggleBtn');
 const historyBarEl = $('#historyBar');
@@ -57,6 +60,7 @@ const pageWordCountEl = $('#pageWordCount');
 async function init() {
   state.settings = await loadSettings();
   updateLanguageToggleUI();
+  updateTechnicalModeUI();
   renderActionCards();
   bindEvents();
 
@@ -77,6 +81,7 @@ function saveTabState() {
     mode: state.mode,
     messages: cloneChatMessages(state.messages),
     pageContext: state.pageContext,
+    technicalAnalysisMode: !!state.technicalAnalysisMode,
     pageKey: state.currentPageKey,
   });
   queuePersistCurrentPageChat();
@@ -93,16 +98,19 @@ async function restoreTabState(tabId) {
     state.mode = source.mode;
     state.messages = cloneChatMessages(source.messages);
     state.pageContext = source.pageContext || null;
+    state.technicalAnalysisMode = !!source.technicalAnalysisMode;
     tabStates.set(tabId, {
       mode: source.mode,
       messages: cloneChatMessages(source.messages),
       pageContext: source.pageContext || null,
+      technicalAnalysisMode: !!source.technicalAnalysisMode,
       pageKey: state.currentPageKey,
     });
   } else {
     state.mode = 'welcome';
     state.messages = [];
     state.pageContext = null;
+    state.technicalAnalysisMode = false;
   }
 
   rebuildUI();
@@ -160,6 +168,7 @@ function rebuildUI() {
     updatePageInfo();
     updateHistoryDropdownUI();
   }
+  updateTechnicalModeUI();
 }
 
 function updatePageInfo() {
@@ -191,6 +200,17 @@ function updateLanguageToggleUI() {
   const langName = lang === 'ru' ? 'Russian' : 'English';
   languageToggleBtn.title = `Response language: ${langName}`;
   languageToggleBtn.setAttribute('aria-label', `Response language: ${langName}`);
+}
+
+function updateTechnicalModeUI() {
+  const enabled = !!state.technicalAnalysisMode;
+  techModeIndicator?.classList.toggle('hidden', !enabled);
+  if (welcomeTechToggleBtn) {
+    welcomeTechToggleBtn.classList.toggle('active', enabled);
+    const text = enabled ? 'ON' : 'OFF';
+    welcomeTechToggleBtn.title = `Technical analysis mode: ${text}`;
+    welcomeTechToggleBtn.setAttribute('aria-label', `Technical analysis mode: ${text}`);
+  }
 }
 
 async function toggleResponseLanguage() {
@@ -227,7 +247,10 @@ async function fetchPageContext(retries = 2) {
   try {
     loadingOverlay.classList.remove('hidden');
     const freshContext = await Promise.race([
-      browser.runtime.sendMessage({type: 'getDistilledContent'}),
+      browser.runtime.sendMessage({
+        type: 'getDistilledContent',
+        options: { includeTechnicalContext: !!state.technicalAnalysisMode },
+      }),
       new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 5000)),
     ]);
     state.pageContext = freshContext;
@@ -272,6 +295,7 @@ function switchToWelcome() {
   disarmClearChatConfirm();
   state.mode = 'welcome';
   state.messages = [];
+  state.technicalAnalysisMode = false;
   closeHistoryMenu();
   welcomeState.classList.remove('hidden');
   chatState.classList.add('hidden');
@@ -285,6 +309,7 @@ function switchToWelcome() {
   stopBtn.classList.add('hidden');
   updatePageInfo();
   updateHistoryDropdownUI();
+  updateTechnicalModeUI();
   if (state.currentTabId != null) {
     tabStates.delete(state.currentTabId);
   }
@@ -314,6 +339,7 @@ function renderActionBar() {
   `).join('');
   const clearLabel = clearChatConfirmArmed ? 'Clear chat (confirm?)' : 'Clear chat';
   const currentLang = getResponseLanguage();
+  const techModeLabel = state.technicalAnalysisMode ? 'Technical mode: ON' : 'Technical mode: OFF';
   actionBarEl.innerHTML = [
     '<div class="action-buttons-scroll" id="actionButtonsScroll">',
     actionButtons,
@@ -329,6 +355,7 @@ function renderActionBar() {
     `        <button class="action-menu-lang-btn${currentLang === 'ru' ? ' active' : ''}" id="menuLangRu" data-lang="ru">RU</button>`,
     '      </div>',
     '    </div>',
+    `    <button class="action-menu-item" id="menuToggleTechnicalMode">${techModeLabel}</button>`,
     '    <button class="action-menu-item" id="menuOpenSettings">Settings</button>',
     '  </div>',
     '</div>',
@@ -367,6 +394,14 @@ function renderActionBar() {
   };
   $('#menuLangEn')?.addEventListener('click', handleMenuLanguageClick);
   $('#menuLangRu')?.addEventListener('click', handleMenuLanguageClick);
+  $('#menuToggleTechnicalMode')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    state.technicalAnalysisMode = !state.technicalAnalysisMode;
+    updateTechnicalModeUI();
+    renderActionBar();
+    $('#actionMenu')?.classList.remove('hidden');
+    saveTabState();
+  });
   $('#menuOpenSettings')?.addEventListener('click', (e) => {
     e.stopPropagation();
     browser.runtime.openOptionsPage();
@@ -542,6 +577,20 @@ function escapeHtml(text) {
   return div.innerHTML;
 }
 
+function renderUserTechMarker() {
+  return '<span class="user-tech-marker" title="Technical analysis mode was used" aria-label="Technical analysis mode was used"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="8 7 3 12 8 17"/><polyline points="16 7 21 12 16 17"/></svg></span>';
+}
+
+function renderAssistantContextBadge(mode) {
+  if (mode === 'tools') {
+    return '<div class="assistant-context-badge tools" title="Used tool calls for page inspection">Context: tools</div>';
+  }
+  if (mode === 'full_context') {
+    return '<div class="assistant-context-badge full" title="Used full page context in prompt">Context: full page</div>';
+  }
+  return '';
+}
+
 function getSourceAnchorsMap() {
   const map = state.pageContext?.sourceAnchors;
   if (!map || typeof map !== 'object') return {};
@@ -645,15 +694,15 @@ function renderMessage(message, index) {
       el.classList.add('message-user-action');
       bubble.innerHTML = [
         '<details class="user-action-message">',
-        `<summary class="user-action-summary"><span class="user-action-icon">${action.icon}</span><span class="user-action-label">${escapeHtml(action.label)}</span><span class="user-action-chevron" aria-hidden="true"><svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></span></summary>`,
+        `<summary class="user-action-summary"><span class="user-action-icon">${action.icon}</span><span class="user-action-label">${escapeHtml(action.label)}</span>${message.technicalModeUsed ? renderUserTechMarker() : ''}<span class="user-action-chevron" aria-hidden="true"><svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></span></summary>`,
         `<div class="user-action-text">${escapeHtml(message.content)}</div>`,
         '</details>',
       ].join('');
     } else {
-      bubble.textContent = message.content;
+      bubble.innerHTML = `${escapeHtml(message.content)}${message.technicalModeUsed ? renderUserTechMarker() : ''}`;
     }
   } else if (message.role === 'assistant') {
-    bubble.innerHTML = renderMarkdown(linkifySourceTags(message.content));
+    bubble.innerHTML = `${renderAssistantContextBadge(message.contextMode)}${renderMarkdown(linkifySourceTags(message.content))}`;
   } else if (message.role === 'notice') {
     bubble.innerHTML = renderContextLimitNotice(message.details || []);
   } else if (message.role === 'error') {
@@ -761,6 +810,7 @@ function handleSend(meta = {}) {
   if (state.mode === 'welcome') switchToChat();
 
   const userMessage = { role: 'user', content: text };
+  userMessage.technicalModeUsed = !!state.technicalAnalysisMode;
   if (meta?.action?.id) {
     userMessage.actionId = meta.action.id;
     userMessage.actionLabel = meta.action.label;
@@ -834,6 +884,10 @@ function renderStreamingBubble(rawText, apiThinking, { partial = true } = {}) {
   }
 
   let html = '';
+  const contextMode = renderStreamingBubble._contextMode || '';
+  if (contextMode) {
+    html += renderAssistantContextBadge(contextMode);
+  }
   if (thinkingText) {
     html += isThinking
       ? buildThinkingHtml('', { streaming: true })
@@ -865,8 +919,10 @@ function createStreamingElement(stream) {
   // Render what's been accumulated so far
   if (stream.streamedText || stream.streamedThinking) {
     renderStreamingBubble._timing = { start: stream.thinkingStartTime, elapsed: stream.thinkingElapsed };
+    renderStreamingBubble._contextMode = stream.contextMode || '';
     bubble.innerHTML = renderStreamingBubble(stream.streamedText, stream.streamedThinking);
     renderStreamingBubble._timing = null;
+    renderStreamingBubble._contextMode = '';
   }
 
   streamEl.appendChild(bubble);
@@ -883,8 +939,10 @@ function updateStreamingDOM(stream) {
   if (!bubble) return;
 
   renderStreamingBubble._timing = { start: stream.thinkingStartTime, elapsed: stream.thinkingElapsed };
+  renderStreamingBubble._contextMode = stream.contextMode || '';
   bubble.innerHTML = renderStreamingBubble(stream.streamedText, stream.streamedThinking);
   renderStreamingBubble._timing = null;
+  renderStreamingBubble._contextMode = '';
 
   bubble.classList.add('streaming-cursor');
   scrollToBottom();
@@ -897,7 +955,10 @@ async function startStreaming() {
 
   // Re-distill the page so the AI sees the current DOM state
   try {
-    const freshContext = await browser.runtime.sendMessage({ type: 'getDistilledContent' });
+    const freshContext = await browser.runtime.sendMessage({
+      type: 'getDistilledContent',
+      options: { includeTechnicalContext: !!state.technicalAnalysisMode },
+    });
     if (freshContext && !freshContext.error) {
       state.pageContext = freshContext;
       updatePageInfo();
@@ -915,6 +976,7 @@ async function startStreaming() {
     streamedThinking: '',
     thinkingStartTime: 0,
     thinkingElapsed: 0,
+    contextMode: '',
   };
   activeStreams.set(tabId, stream);
 
@@ -936,6 +998,9 @@ async function startStreaming() {
       if (stream.streamedThinking && !stream.thinkingElapsed) {
         stream.thinkingElapsed = Date.now() - stream.thinkingStartTime;
       }
+      updateStreamingDOM(stream);
+    } else if (msg.type === 'context_mode') {
+      stream.contextMode = msg.mode || '';
       updateStreamingDOM(stream);
     } else if (msg.type === 'stream_end') {
       finishStream(tabId, msg.aborted);
@@ -973,6 +1038,9 @@ async function startStreaming() {
     type: 'chat',
     messages: apiMessages,
     pageContext: state.pageContext,
+    chatOptions: {
+      technicalAnalysisMode: !!state.technicalAnalysisMode,
+    },
   });
 }
 
@@ -986,6 +1054,7 @@ function finishStream(tabId, aborted) {
   if (stream.streamedText && tabState) {
     const msg = { role: 'assistant', content: stream.streamedText };
     if (stream.streamedThinking) msg.thinking = stream.streamedThinking;
+    if (stream.contextMode) msg.contextMode = stream.contextMode;
     tabState.messages.push(msg);
   }
 
@@ -1001,11 +1070,14 @@ function finishStream(tabId, aborted) {
 
       if (stream.streamedText) {
         renderStreamingBubble._timing = { start: stream.thinkingStartTime, elapsed: stream.thinkingElapsed };
+        renderStreamingBubble._contextMode = stream.contextMode || '';
         bubble.innerHTML = renderStreamingBubble(stream.streamedText, stream.streamedThinking, { partial: false });
         renderStreamingBubble._timing = null;
+        renderStreamingBubble._contextMode = '';
 
         const msg = { role: 'assistant', content: stream.streamedText };
         if (stream.streamedThinking) msg.thinking = stream.streamedThinking;
+        if (stream.contextMode) msg.contextMode = stream.contextMode;
         state.messages.push(msg);
       } else if (!aborted) {
         bubble.innerHTML = '<em>No response received.</em>';
@@ -1057,6 +1129,12 @@ function bindEvents() {
   settingsBtn.addEventListener('click', () => browser.runtime.openOptionsPage());
   languageToggleBtn.addEventListener('click', () => {
     void toggleResponseLanguage();
+  });
+  welcomeTechToggleBtn?.addEventListener('click', () => {
+    state.technicalAnalysisMode = !state.technicalAnalysisMode;
+    updateTechnicalModeUI();
+    if (state.mode === 'chat') renderActionBar();
+    saveTabState();
   });
   historyToggleBtn.addEventListener('click', (e) => {
     e.stopPropagation();
@@ -1177,6 +1255,10 @@ function cloneChatMessages(messages) {
       if (msg.role === 'user') {
         if (typeof msg.actionId === 'string' && msg.actionId) cloned.actionId = msg.actionId;
         if (typeof msg.actionLabel === 'string' && msg.actionLabel) cloned.actionLabel = msg.actionLabel;
+        if (typeof msg.technicalModeUsed === 'boolean') cloned.technicalModeUsed = msg.technicalModeUsed;
+      }
+      if (msg.role === 'assistant') {
+        if (typeof msg.contextMode === 'string' && msg.contextMode) cloned.contextMode = msg.contextMode;
       }
       if (msg.role === 'notice') {
         if (typeof msg.noticeKey === 'string') cloned.noticeKey = msg.noticeKey;
@@ -1218,6 +1300,7 @@ async function loadPersistedChatForPage(pageKey) {
     mode: saved.mode === 'chat' ? 'chat' : 'welcome',
     messages: cloneChatMessages(saved.messages),
     pageContext: saved.pageContext || null,
+    technicalAnalysisMode: !!saved.technicalAnalysisMode,
   };
 }
 
@@ -1238,6 +1321,7 @@ async function persistCurrentPageChat() {
     mode: 'chat',
     messages: cloneChatMessages(state.messages),
     pageContext: state.pageContext || null,
+    technicalAnalysisMode: !!state.technicalAnalysisMode,
     updatedAt: Date.now(),
   };
 

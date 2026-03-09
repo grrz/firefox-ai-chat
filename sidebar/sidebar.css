@@ -214,6 +214,12 @@ body {
   color: var(--text-primary);
 }
 
+.tech-toggle-btn.active {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg-primary));
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--bg-primary));
+}
+
 /* ========== Welcome State ========== */
 .welcome-state {
   flex: 1;
@@ -392,6 +398,19 @@ body {
   word-break: break-word;
 }
 
+.user-tech-marker {
+  display: inline-flex;
+  vertical-align: text-bottom;
+  margin-left: 6px;
+  opacity: 0.9;
+}
+
+.user-tech-marker svg {
+  width: 12px;
+  height: 12px;
+  display: block;
+}
+
 .message-user-action .message-bubble {
   max-width: 100%;
 }
@@ -467,6 +486,29 @@ body {
   padding: 8px 12px;
   max-width: 100%;
   word-break: break-word;
+}
+
+.assistant-context-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  margin: 0 0 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.4;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.assistant-context-badge.tools {
+  background: color-mix(in srgb, var(--accent) 18%, Canvas);
+  color: color-mix(in srgb, var(--accent) 78%, CanvasText);
+}
+
+.assistant-context-badge.full {
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
 }
 
 .message-notice {
@@ -926,6 +968,19 @@ body {
 
 #userInput::placeholder {
   color: var(--text-muted);
+}
+
+.tech-mode-indicator {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, var(--bg-primary));
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--bg-primary));
+  flex-shrink: 0;
 }
 
 .send-btn, .stop-btn {

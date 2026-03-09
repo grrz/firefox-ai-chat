@@ -44,4 +44,13 @@ export class BaseProvider {
   getModel() {
     return this.config.model || this.config.defaultModel;
   }
+
+  /**
+   * Whether provider/model supports tool calling.
+   * Subclasses can override and perform runtime probing.
+   * @returns {Promise<boolean>}
+   */
+  async supportsTools() {
+    return false;
+  }
 }

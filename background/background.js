@@ -23,8 +23,9 @@ function createProvider(settings) {
   }
 }
 
-function buildChatMessages(messages, pageContext, settings) {
+function buildChatMessages(messages, pageContext, settings, options = {}) {
   const chatMessages = [];
+  const useToolMode = !!options.useToolMode;
 
   let systemContent = SYSTEM_PROMPT;
   const selectedLanguage = RESPONSE_LANGUAGES[settings?.responseLanguage] || RESPONSE_LANGUAGES.en;
@@ -37,8 +38,19 @@ function buildChatMessages(messages, pageContext, settings) {
     systemContent += '\nFor each meaningful claim or list item, append one or more relevant tags like [s12] or [s12, s18].';
     systemContent += '\nOnly use source tags that exist in the context; never invent tags.';
   }
-  if (pageContext?.textContent) {
+  if (pageContext?.technicalContext) {
+    systemContent += '\n\nTechnical DOM/CSS/JS analysis mode is enabled.';
+    systemContent += '\nWhen the user asks implementation/debugging questions, use the TECHNICAL CONTEXT section.';
+    systemContent += '\nIf a requested technical detail is not present there, say that explicitly instead of guessing.';
+  }
+  if (pageContext?.textContent && !useToolMode) {
     systemContent += `\n\n--- PAGE CONTEXT ---\n${pageContext.textContent}\n--- END PAGE CONTEXT ---`;
+  } else if (pageContext?.title || pageContext?.url) {
+    systemContent += '\n\n--- PAGE SUMMARY ---';
+    if (pageContext?.title) systemContent += `\nTitle: ${pageContext.title}`;
+    if (pageContext?.url) systemContent += `\nURL: ${pageContext.url}`;
+    if (pageContext?.wordCount) systemContent += `\nWord count: ${pageContext.wordCount}`;
+    systemContent += '\n--- END PAGE SUMMARY ---';
   }
   chatMessages.push({ role: 'system', content: systemContent });
 
@@ -90,9 +102,13 @@ function clonePersistableMessages(messages) {
     .map((msg) => {
       const cloned = { role: msg.role, content: msg.content };
       if (typeof msg.thinking === 'string' && msg.thinking) cloned.thinking = msg.thinking;
+      if (msg.role === 'assistant' && typeof msg.contextMode === 'string' && msg.contextMode) {
+        cloned.contextMode = msg.contextMode;
+      }
       if (msg.role === 'user') {
         if (typeof msg.actionId === 'string' && msg.actionId) cloned.actionId = msg.actionId;
         if (typeof msg.actionLabel === 'string' && msg.actionLabel) cloned.actionLabel = msg.actionLabel;
+        if (typeof msg.technicalModeUsed === 'boolean') cloned.technicalModeUsed = msg.technicalModeUsed;
       }
       return cloned;
     });
@@ -104,7 +120,7 @@ function trimPersistedChats(chatsByPage) {
   return Object.fromEntries(entries.slice(0, MAX_SAVED_PAGE_CHATS));
 }
 
-async function persistChatForPage(pageKey, messages, pageContext) {
+async function persistChatForPage(pageKey, messages, pageContext, chatOptions = {}) {
   if (!pageKey) return;
   const saved = await browser.storage.local.get(PAGE_CHATS_STORAGE_KEY);
   const chatsByPage = (saved?.[PAGE_CHATS_STORAGE_KEY] && typeof saved[PAGE_CHATS_STORAGE_KEY] === 'object')
@@ -115,13 +131,15 @@ async function persistChatForPage(pageKey, messages, pageContext) {
     mode: 'chat',
     messages: clonePersistableMessages(messages),
     pageContext: pageContext || null,
+    technicalAnalysisMode: !!chatOptions.technicalAnalysisMode,
     updatedAt: Date.now(),
   };
 
   await browser.storage.local.set({ [PAGE_CHATS_STORAGE_KEY]: trimPersistedChats(chatsByPage) });
 }
 
-async function getDistilledContentForActiveTab() {
+async function getDistilledContentForActiveTab(options = {}) {
+  const includeTechnicalContext = !!options.includeTechnicalContext;
   const tabs = await browser.tabs.query({ active: true, currentWindow: true });
   if (!tabs[0]) return { error: 'No active tab' };
 
@@ -137,14 +155,26 @@ async function getDistilledContentForActiveTab() {
 
   // Fallback to top frame if frame enumeration is unavailable.
   if (!Array.isArray(frames) || frames.length === 0) {
-    return browser.tabs.sendMessage(tabId, {type: 'distill', options: {includeIframes: true}});
+    return browser.tabs.sendMessage(tabId, {
+      type: 'distill',
+      options: {
+        includeIframes: true,
+        includeTechnicalContext,
+      },
+    });
   }
 
   for (const frame of frames) {
     try {
       const data = await browser.tabs.sendMessage(
         tabId,
-        { type: 'distill', options: { includeIframes: false } },
+        {
+          type: 'distill',
+          options: {
+            includeIframes: false,
+            includeTechnicalContext: includeTechnicalContext && frame.frameId === 0,
+          },
+        },
         { frameId: frame.frameId }
       );
       if (data && !data.error) {
@@ -207,6 +237,7 @@ async function getDistilledContentForActiveTab() {
     textContent,
     wordCount,
     sourceAnchors: topFrame.data.sourceAnchors || {},
+    technicalContext: topFrame.data.technicalContext || null,
     contextLimits,
   };
 }
@@ -218,6 +249,7 @@ browser.runtime.onConnect.addListener((port) => {
   let abortController = null;
   let requestMessages = [];
   let requestPageContext = null;
+  let requestChatOptions = {};
   let streamedText = '';
   let streamedThinking = '';
 
@@ -229,9 +261,10 @@ browser.runtime.onConnect.addListener((port) => {
 
     if (message.type === 'chat') {
       abortController = new AbortController();
-      const { messages, pageContext } = message;
+      const { messages, pageContext, chatOptions } = message;
       requestMessages = Array.isArray(messages) ? messages : [];
       requestPageContext = pageContext || null;
+      requestChatOptions = chatOptions && typeof chatOptions === 'object' ? chatOptions : {};
       streamedText = '';
       streamedThinking = '';
 
@@ -245,12 +278,23 @@ browser.runtime.onConnect.addListener((port) => {
           return;
         }
 
-        const chatMessages = buildChatMessages(messages, pageContext, settings);
+        let useToolMode = false;
+        if (settings.activeProvider === 'lmstudio' && typeof provider.supportsTools === 'function') {
+          useToolMode = await provider.supportsTools();
+        }
+
+        const chatMessages = buildChatMessages(messages, pageContext, settings, { useToolMode });
+        const contextMode = useToolMode ? 'tools' : 'full_context';
+        try {
+          port.postMessage({ type: 'context_mode', mode: contextMode });
+        } catch {}
 
         port.postMessage({ type: 'stream_start' });
 
         await provider.sendMessage(chatMessages, {
           signal: abortController.signal,
+          pageContext,
+          useToolMode,
           onThinkingToken: (token) => {
             streamedThinking += token;
             try {
@@ -275,7 +319,7 @@ browser.runtime.onConnect.addListener((port) => {
           const assistantMessage = { role: 'assistant', content: streamedText };
           if (streamedThinking) assistantMessage.thinking = streamedThinking;
           const fullMessages = [...requestMessages, assistantMessage];
-          await persistChatForPage(pageKey, fullMessages, requestPageContext);
+          await persistChatForPage(pageKey, fullMessages, requestPageContext, requestChatOptions);
         }
 
         port.postMessage({ type: 'stream_end' });
@@ -306,7 +350,9 @@ browser.runtime.onConnect.addListener((port) => {
 browser.runtime.onMessage.addListener(async (message) => {
   if (message.type === 'getDistilledContent') {
     try {
-      return await getDistilledContentForActiveTab();
+      return await getDistilledContentForActiveTab({
+        includeTechnicalContext: !!message?.options?.includeTechnicalContext,
+      });
     } catch (err) {
       return {
         title: '',

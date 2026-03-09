@@ -21,7 +21,6 @@
     '.sidebar', 'aside', '[role="complementary"]',
     '.related-posts', '.recommended',
     'script', 'style', 'noscript', 'iframe', 'svg', 'canvas',
-    'form', 'button', 'input', 'select', 'textarea',
   ];
 
   const MAIN_CONTENT_SELECTORS = [
@@ -186,6 +185,70 @@
     return blocks;
   }
 
+  function getControlLabel(el) {
+    const id = el.id && el.id.trim();
+    if (id) {
+      const escapedId = window.CSS?.escape ? window.CSS.escape(id) : id.replace(/[^a-zA-Z0-9\-_:.]/g, '\\$&');
+      const label = document.querySelector(`label[for="${escapedId}"]`);
+      const labelText = (label?.textContent || '').replace(/\s+/g, ' ').trim();
+      if (labelText) return labelText;
+    }
+    const aria = (el.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
+    if (aria) return aria;
+    const placeholder = (el.getAttribute('placeholder') || '').replace(/\s+/g, ' ').trim();
+    if (placeholder) return placeholder;
+    const name = (el.getAttribute('name') || '').trim();
+    if (name) return name;
+    return el.tagName.toLowerCase();
+  }
+
+  function extractFormState(root) {
+    const MAX_FIELDS = 120;
+    const out = [];
+    const controls = Array.from(root.querySelectorAll('input, select, textarea, button'));
+    for (const el of controls) {
+      if (out.length >= MAX_FIELDS) break;
+      const tag = el.tagName.toLowerCase();
+      const type = (el.getAttribute('type') || '').toLowerCase();
+      if (tag === 'input' && type === 'hidden') continue;
+
+      const label = getControlLabel(el);
+      let value = '';
+      if (tag === 'button' || type === 'submit' || type === 'button') {
+        value = (el.textContent || '').replace(/\s+/g, ' ').trim();
+      } else if (type === 'checkbox' || type === 'radio') {
+        value = el.checked ? 'checked' : 'not checked';
+      } else if (tag === 'select') {
+        const selected = Array.from(el.selectedOptions || [])
+          .map((o) => (o.textContent || '').replace(/\s+/g, ' ').trim())
+          .filter(Boolean)
+          .slice(0, 3);
+        value = selected.join(', ');
+      } else if (type === 'password') {
+        value = '<hidden>';
+      } else {
+        value = String(el.value || '').replace(/\s+/g, ' ').trim();
+      }
+
+      const meta = [];
+      if (tag === 'input' && type) meta.push(type);
+      const role = (el.getAttribute('role') || '').trim();
+      if (role) meta.push(`role=${role}`);
+      const ariaExpanded = (el.getAttribute('aria-expanded') || '').trim();
+      if (ariaExpanded) meta.push(`aria-expanded=${ariaExpanded}`);
+      const ariaAutocomplete = (el.getAttribute('aria-autocomplete') || '').trim();
+      if (ariaAutocomplete) meta.push(`aria-autocomplete=${ariaAutocomplete}`);
+      if (el.required) meta.push('required');
+      if (el.disabled) meta.push('disabled');
+      const summary = `${label}: ${value || '(empty)'}${meta.length ? ` [${meta.join(', ')}]` : ''}`;
+      out.push({
+        summary: summary.slice(0, 240),
+        selector: toSelector(el),
+      });
+    }
+    return out;
+  }
+
   function uniqueBy(items, keyFn) {
     const seen = new Set();
     const out = [];
@@ -203,6 +266,231 @@
     if (items.length <= max) return items;
     limits.push(`${label}: kept ${max} of ${items.length}`);
     return items.slice(0, max);
+  }
+
+  function summarizeDomTree(root) {
+    const MAX_NODES = 120;
+    const MAX_DEPTH = 4;
+    const MAX_CHILDREN_PER_NODE = 10;
+    const lines = [];
+    const stack = [{ el: root, depth: 0 }];
+    let visited = 0;
+
+    while (stack.length > 0 && visited < MAX_NODES) {
+      const { el, depth } = stack.pop();
+      if (!el || el.nodeType !== Node.ELEMENT_NODE) continue;
+      const tag = el.tagName.toLowerCase();
+      if (tag === 'script' || tag === 'style' || tag === 'noscript') continue;
+
+      const id = el.id ? `#${el.id}` : '';
+      const classList = Array.from(el.classList || []).slice(0, 2);
+      const classes = classList.length ? `.${classList.join('.')}` : '';
+      const role = (el.getAttribute('role') || '').trim();
+      const roleSuffix = role ? ` [role=${role}]` : '';
+      const prefix = '  '.repeat(depth);
+      lines.push(`${prefix}- ${tag}${id}${classes}${roleSuffix}`);
+      visited += 1;
+
+      if (depth >= MAX_DEPTH) continue;
+      const children = Array.from(el.children || [])
+        .filter((c) => c && c.nodeType === Node.ELEMENT_NODE)
+        .slice(0, MAX_CHILDREN_PER_NODE);
+      for (let i = children.length - 1; i >= 0; i--) {
+        stack.push({ el: children[i], depth: depth + 1 });
+      }
+    }
+
+    return {
+      lines,
+      truncated: visited >= MAX_NODES,
+    };
+  }
+
+  function summarizeStyles() {
+    const styleTags = document.querySelectorAll('style').length;
+    const stylesheetLinks = document.querySelectorAll('link[rel="stylesheet"]').length;
+    const inlineStyleAttrs = document.querySelectorAll('[style]').length;
+    const cssVariables = document.querySelectorAll('[style*="--"]').length;
+    let stylesheetCount = 0;
+    try {
+      stylesheetCount = document.styleSheets?.length || 0;
+    } catch {}
+
+    const bodyStyle = window.getComputedStyle(document.body);
+    return {
+      stylesheetCount,
+      styleTags,
+      stylesheetLinks,
+      inlineStyleAttrs,
+      cssVariables,
+      body: {
+        fontFamily: bodyStyle.fontFamily,
+        fontSize: bodyStyle.fontSize,
+        color: bodyStyle.color,
+        backgroundColor: bodyStyle.backgroundColor,
+      },
+    };
+  }
+
+  function summarizeScripts() {
+    const scripts = Array.from(document.scripts || []);
+    const external = [];
+    let inlineCount = 0;
+    for (const s of scripts) {
+      const src = (s.getAttribute('src') || '').trim();
+      if (!src) {
+        inlineCount += 1;
+        continue;
+      }
+      external.push(src);
+    }
+
+    const libs = [];
+    const srcJoined = external.join(' ').toLowerCase();
+    const has = (name, fn) => {
+      try { return !!fn(); } catch { return false; }
+    };
+    if (has('React', () => !!window.React || srcJoined.includes('react'))) libs.push('React');
+    if (has('Vue', () => !!window.Vue || srcJoined.includes('vue'))) libs.push('Vue');
+    if (has('Angular', () => !!window.ng || srcJoined.includes('angular'))) libs.push('Angular');
+    if (has('Svelte', () => srcJoined.includes('svelte'))) libs.push('Svelte');
+    if (has('jQuery', () => !!window.jQuery || srcJoined.includes('jquery'))) libs.push('jQuery');
+    if (has('Next.js', () => !!window.__NEXT_DATA__ || srcJoined.includes('next'))) libs.push('Next.js');
+    if (has('Nuxt', () => !!window.__NUXT__ || srcJoined.includes('nuxt'))) libs.push('Nuxt');
+    if (has('Webpack', () => srcJoined.includes('webpack') || !!window.webpackChunk)) libs.push('Webpack');
+
+    return {
+      totalScripts: scripts.length,
+      inlineCount,
+      externalCount: external.length,
+      externalExamples: external.slice(0, 15),
+      detectedLibraries: libs,
+    };
+  }
+
+  function truncateTextWithNotice(text, limit, label) {
+    const value = String(text || '');
+    if (value.length <= limit) return { text: value, truncated: false };
+    return {
+      text: `${value.slice(0, limit)}\n\n... [${label} truncated: ${value.length - limit} chars omitted]`,
+      truncated: true,
+    };
+  }
+
+  function buildDeepSnapshot(root) {
+    const DOM_CHAR_LIMIT = 180000;
+    const STYLES_CHAR_LIMIT = 120000;
+    const INLINE_JS_CHAR_LIMIT = 120000;
+
+    const domHtml = truncateTextWithNotice(root?.outerHTML || '', DOM_CHAR_LIMIT, 'DOM snapshot');
+
+    const styleTags = Array.from(document.querySelectorAll('style'))
+      .map((el, idx) => {
+        const content = (el.textContent || '').trim();
+        return `/* <style #${idx + 1}> */\n${content}`;
+      })
+      .filter(Boolean)
+      .join('\n\n');
+    const stylesRaw = truncateTextWithNotice(styleTags, STYLES_CHAR_LIMIT, 'inline styles');
+
+    const externalScripts = Array.from(document.querySelectorAll('script[src]'))
+      .map((el) => (el.getAttribute('src') || '').trim())
+      .filter(Boolean);
+    const inlineScriptsRaw = Array.from(document.querySelectorAll('script:not([src])'))
+      .map((el, idx) => {
+        const content = (el.textContent || '').trim();
+        if (!content) return '';
+        return `/* <script inline #${idx + 1}> */\n${content}`;
+      })
+      .filter(Boolean)
+      .join('\n\n');
+    const inlineScripts = truncateTextWithNotice(inlineScriptsRaw, INLINE_JS_CHAR_LIMIT, 'inline scripts');
+
+    return {
+      domHtml: domHtml.text,
+      domTruncated: domHtml.truncated,
+      stylesRaw: stylesRaw.text,
+      stylesTruncated: stylesRaw.truncated,
+      externalScripts,
+      inlineScriptsRaw: inlineScripts.text,
+      inlineScriptsTruncated: inlineScripts.truncated,
+    };
+  }
+
+  function buildTechnicalContextSection() {
+    const root = findMainContent(document.body);
+    const dom = summarizeDomTree(root);
+    const styles = summarizeStyles();
+    const scripts = summarizeScripts();
+    const formControls = extractFormState(root).slice(0, 80);
+    const deep = buildDeepSnapshot(root);
+
+    const lines = [];
+    lines.push('## TECHNICAL CONTEXT (DOM/CSS/JS)');
+    lines.push('');
+    lines.push('### Form Controls (live DOM)');
+    if (formControls.length === 0) {
+      lines.push('- none detected');
+    } else {
+      for (const field of formControls) lines.push(`- ${field.summary}`);
+      if (formControls.length >= 80) lines.push('- ... truncated for size');
+    }
+    lines.push('');
+    lines.push('### DOM Tree (main content excerpt)');
+    for (const line of dom.lines) lines.push(line);
+    if (dom.truncated) lines.push('- ... truncated for size');
+    lines.push('');
+    lines.push('### CSS Summary');
+    lines.push(`- stylesheets (document.styleSheets): ${styles.stylesheetCount}`);
+    lines.push(`- <style> tags: ${styles.styleTags}`);
+    lines.push(`- stylesheet <link> tags: ${styles.stylesheetLinks}`);
+    lines.push(`- elements with inline style attr: ${styles.inlineStyleAttrs}`);
+    lines.push(`- elements with CSS variables in style attr: ${styles.cssVariables}`);
+    lines.push(`- body font: ${styles.body.fontFamily} (${styles.body.fontSize})`);
+    lines.push(`- body text color: ${styles.body.color}`);
+    lines.push(`- body background color: ${styles.body.backgroundColor}`);
+    lines.push('');
+    lines.push('### Script Summary');
+    lines.push(`- total scripts: ${scripts.totalScripts}`);
+    lines.push(`- external scripts: ${scripts.externalCount}`);
+    lines.push(`- inline scripts: ${scripts.inlineCount}`);
+    lines.push(`- detected libraries/frameworks: ${scripts.detectedLibraries.join(', ') || 'none detected'}`);
+    if (scripts.externalExamples.length > 0) {
+      lines.push('- external script examples:');
+      for (const src of scripts.externalExamples) lines.push(`  - ${src}`);
+    }
+    lines.push('');
+
+    lines.push('### FULL DOM Snapshot (raw HTML)');
+    lines.push('```html');
+    lines.push(deep.domHtml || '<empty>');
+    lines.push('```');
+    lines.push('');
+
+    lines.push('### FULL Inline CSS Snapshot (<style> tags)');
+    lines.push('```css');
+    lines.push(deep.stylesRaw || '/* none */');
+    lines.push('```');
+    lines.push('');
+
+    lines.push('### FULL JS Snapshot');
+    lines.push('- external script src list:');
+    if (deep.externalScripts.length === 0) {
+      lines.push('  - none');
+    } else {
+      for (const src of deep.externalScripts) lines.push(`  - ${src}`);
+    }
+    lines.push('');
+    lines.push('inline scripts:');
+    lines.push('```js');
+    lines.push(deep.inlineScriptsRaw || '// none');
+    lines.push('```');
+    lines.push('');
+
+    return {
+      sectionText: lines.join('\n'),
+      data: { dom, styles, scripts, deep },
+    };
   }
 
   function looksLikeVisibleContentFrame(iframeEl) {
@@ -492,6 +780,18 @@
       return ` [${sourceId}]`;
     }
 
+    function sourceTagForSelector(selector, text) {
+      if (!selector) return '';
+      sourceSeq += 1;
+      const sourceId = `s${sourceSeq}`;
+      sourceAnchors[sourceId] = {
+        selector,
+        snippet: String(text || '').replace(/\s+/g, ' ').trim().slice(0, 220),
+        occurrence: 1,
+      };
+      return ` [${sourceId}]`;
+    }
+
     lines.push(`# ${data.title}`);
     lines.push(`URL: ${data.url}`);
     if (data.description) lines.push(`Description: ${data.description}`);
@@ -561,6 +861,16 @@
         lines.push(comment);
         lines.push('');
       }
+    }
+
+    if (Array.isArray(data.forms) && data.forms.length > 0) {
+      lines.push('');
+      lines.push('## Form Fields (current state)');
+      lines.push('');
+      for (const field of data.forms) {
+        lines.push(`- ${field.summary}${sourceTagForSelector(field.selector, field.summary)}`);
+      }
+      lines.push('');
     }
 
     return {
@@ -1180,7 +1490,13 @@
     const transcript = await fetchYouTubeTranscript(playerResponse);
     const comments = extractYouTubeComments();
 
-    const textContent = buildYouTubeTextContent(meta, description, transcript, comments);
+    let textContent = buildYouTubeTextContent(meta, description, transcript, comments);
+    let technicalContext = null;
+    if (options?.includeTechnicalContext) {
+      const technical = buildTechnicalContextSection();
+      textContent += `\n\n${technical.sectionText}`;
+      technicalContext = technical.data;
+    }
     const wordCount = textContent.split(/\s+/).filter(Boolean).length;
 
     return {
@@ -1189,6 +1505,7 @@
       description: description.substring(0, 300),
       textContent,
       wordCount,
+      technicalContext,
       contextLimits: {
         applied: false,
         details: [],
@@ -1199,7 +1516,7 @@
   // ── Generic extraction ─────────────────────────────────────────────
 
   async function distill(options = {}) {
-    if (isYouTubeWatchPage()) return distillYouTube();
+    if (isYouTubeWatchPage()) return distillYouTube(options);
 
     const mainDocContent = extractMainContentFromDocument(document);
     const includeIframes = options.includeIframes !== false;
@@ -1246,11 +1563,23 @@
         limits
       ),
       comments: extractComments(),
+      forms: limitArray(
+        extractFormState(findMainContent(document.body)),
+        120,
+        'form fields',
+        limits
+      ),
     };
 
     const liveRoot = findMainContent(document.body);
     const built = buildTextContentWithSources(data, { liveRoot });
-    const textContent = built.textContent;
+    let textContent = built.textContent;
+    let technicalContext = null;
+    if (options.includeTechnicalContext) {
+      const technical = buildTechnicalContextSection();
+      textContent += `\n\n${technical.sectionText}`;
+      technicalContext = technical.data;
+    }
     const wordCount = textContent.split(/\s+/).filter(Boolean).length;
 
     return {
@@ -1260,6 +1589,7 @@
       textContent,
       wordCount,
       sourceAnchors: built.sourceAnchors || {},
+      technicalContext,
       contextLimits: {
         applied: limits.length > 0,
         details: limits,
