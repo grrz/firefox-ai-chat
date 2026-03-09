@@ -416,22 +416,45 @@
   function createMatcher(root, selector, pickText) {
     const elements = Array.from(root.querySelectorAll(selector));
     const exact = new Map();
+    const exactCursors = new Map();
+    const used = new WeakSet();
     for (const el of elements) {
       const key = normalizeTextForMatch(pickText(el));
       if (!key) continue;
-      if (!exact.has(key)) exact.set(key, el);
+      if (!exact.has(key)) exact.set(key, []);
+      exact.get(key).push(el);
     }
     return (targetText) => {
       const normalized = normalizeTextForMatch(targetText);
-      if (!normalized) return null;
-      const direct = exact.get(normalized);
-      if (direct) return direct;
+      if (!normalized) return { el: null, occurrence: 1 };
+      const bucket = exact.get(normalized);
+      if (bucket && bucket.length > 0) {
+        let idx = exactCursors.get(normalized) || 0;
+        while (idx < bucket.length && used.has(bucket[idx])) idx += 1;
+        if (idx >= bucket.length) idx = Math.min((exactCursors.get(normalized) || 0), bucket.length - 1);
+        const chosen = bucket[idx] || bucket[bucket.length - 1];
+        exactCursors.set(normalized, Math.min(idx + 1, bucket.length));
+        if (chosen) used.add(chosen);
+        return { el: chosen || null, occurrence: idx + 1 };
+      }
+
+      let best = null;
+      let bestScore = -1;
+      let occurrence = 1;
       for (const el of elements) {
         const text = normalizeTextForMatch(pickText(el));
         if (!text) continue;
-        if (text.includes(normalized) || normalized.includes(text)) return el;
+        if (!(text.includes(normalized) || normalized.includes(text))) continue;
+        let score = Math.min(text.length, normalized.length);
+        if (used.has(el)) score -= 1000;
+        if (score > bestScore) {
+          bestScore = score;
+          best = el;
+          occurrence = 1;
+        }
       }
-      return null;
+      if (best) used.add(best);
+      return { el: best, occurrence };
     };
   }
 
@@ -453,7 +476,9 @@
     function sourceTag(type, text, fallback = '') {
       const finder = matchers[type];
       if (!finder || !text) return '';
-      const el = finder(text) || (fallback ? finder(fallback) : null);
+      let found = finder(text);
+      if ((!found || !found.el) && fallback) found = finder(fallback);
+      const el = found?.el;
       if (!el) return '';
       const selector = toSelector(el);
       if (!selector) return '';
@@ -462,6 +487,7 @@
       sourceAnchors[sourceId] = {
         selector,
         snippet: String(text).replace(/\s+/g, ' ').trim().slice(0, 220),
+        occurrence: Number(found?.occurrence) || 1,
       };
       return ` [${sourceId}]`;
     }
@@ -1256,6 +1282,7 @@
     if (message.type === 'scrollToSource') {
       const selector = String(message.selector || '');
       const snippet = String(message.snippet || '').trim();
+      const occurrence = Math.max(1, Number(message.occurrence) || 1);
       if (!selector && !snippet) return { ok: false, error: 'missing selector/snippet' };
       let el = null;
       if (selector) {
@@ -1268,6 +1295,7 @@
       if (!el && snippet) {
         const root = findMainContent(document.body);
         const target = snippet.replace(/\s+/g, ' ').trim().toLowerCase();
+        const exactCandidates = [];
         const targetWords = target.split(/\s+/).filter((w) => w.length >= 4);
         const scoreCandidate = (candidateText) => {
           const text = candidateText.replace(/\s+/g, ' ').trim().toLowerCase();
@@ -1292,13 +1320,18 @@
           const raw = node.tagName === 'IMG'
             ? (node.getAttribute('alt') || '')
             : (node.textContent || '');
+          const normalized = raw.replace(/\s+/g, ' ').trim().toLowerCase();
+          if (normalized === target) exactCandidates.push(node);
           const score = scoreCandidate(raw);
           if (score > bestScore) {
             bestScore = score;
             best = node;
           }
         }
-        if (best && bestScore >= 120) {
+        if (exactCandidates.length > 0) {
+          const idx = Math.min(exactCandidates.length - 1, occurrence - 1);
+          el = exactCandidates[idx];
+        } else if (best && bestScore >= 120) {
           el = best;
         }
       }

@@ -30,6 +30,7 @@ let shouldAutoScroll = true;
 let clearChatConfirmArmed = false;
 let actionButtonsCompactRaf = null;
 let actionButtonsResizeObserver = null;
+const sourceGroupCursors = new Map();
 
 // ========== DOM References ==========
 const $ = (sel) => document.querySelector(sel);
@@ -596,6 +597,7 @@ async function scrollToSourceFromChat(sourceId) {
       type: 'scrollToSource',
       selector: anchor.selector,
       snippet: anchor.snippet || '',
+      occurrence: Number(anchor.occurrence) || 1,
     });
   } catch {
     // Ignore scroll failures; links remain best-effort.
@@ -613,9 +615,16 @@ async function scrollToSourceGroupFromChat(label) {
   const hi = Math.max(start, end);
   const cap = Math.min(hi, lo + 50);
   const anchors = getSourceAnchorsMap();
-  for (let i = lo; i <= cap; i++) {
-    const id = `s${i}`;
+  const ids = [];
+  for (let i = lo; i <= cap; i++) ids.push(`s${i}`);
+  const available = ids.filter((id) => !!anchors[id]?.selector);
+  if (available.length === 0) return;
+  const cursor = sourceGroupCursors.get(normalized) || 0;
+  for (let step = 0; step < available.length; step++) {
+    const idx = (cursor + step) % available.length;
+    const id = available[idx];
     if (anchors[id]?.selector) {
+      sourceGroupCursors.set(normalized, (idx + 1) % available.length);
       await scrollToSourceFromChat(id);
       return;
     }

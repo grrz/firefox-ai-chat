@@ -328,7 +328,12 @@ browser.runtime.onMessage.addListener(async (message) => {
       if (!tabs[0]?.id) return { ok: false, error: 'No active tab' };
       return await browser.tabs.sendMessage(
         tabs[0].id,
-        { type: 'scrollToSource', selector: message.selector, snippet: message.snippet || '' },
+        {
+          type: 'scrollToSource',
+          selector: message.selector,
+          snippet: message.snippet || '',
+          occurrence: Number(message.occurrence) || 1,
+        },
         { frameId: 0 }
       );
     } catch (err) {
