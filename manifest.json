@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "AI Sidebar",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "Chat with AI about any web page using Claude, OpenAI, Grok, or a local LLM.",
   "icons": {
     "16": "icons/icon-16.png",
