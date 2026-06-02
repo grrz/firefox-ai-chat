@@ -108,6 +108,11 @@ function saveTabState() {
   queuePersistCurrentPageChat();
 }
 
+function pageContextMatchesCurrentPage(context = state.pageContext) {
+  if (!context?.url || !state.currentPageKey) return false;
+  return normalizePageUrl(context.url) === state.currentPageKey;
+}
+
 async function restoreTabState(tabId) {
   const saved = tabStates.get(tabId);
   const savedForPage = saved && saved.pageKey === state.currentPageKey ? saved : null;
@@ -152,7 +157,7 @@ async function restoreTabState(tabId) {
     sendBtn.classList.add('hidden');
     stopBtn.classList.remove('hidden');
     scrollToBottom();
-  } else if (!source || source.messages.length === 0) {
+  } else if (!pageContextMatchesCurrentPage()) {
     await fetchPageContext();
   }
 }
@@ -178,7 +183,7 @@ function rebuildUI() {
         const el = renderMessage(msg, i);
         if (msg.role === 'assistant') {
           const bubble = el.querySelector('.message-bubble');
-          setSanitizedHtml(bubble, renderStreamingBubble(msg.content, msg.thinking || '', { partial: false }));
+          setAssistantBubbleHtml(bubble, renderStreamingBubble(msg.content, msg.thinking || '', { partial: false }));
         }
         messagesEl.appendChild(el);
       }
@@ -277,13 +282,31 @@ async function fetchPageContext(retries = 2) {
         tabId: state.currentTabId,
         options: { includeTechnicalContext: !!state.technicalAnalysisMode },
       }),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 5000)),
+      new Promise((_, reject) => setTimeout(() => {
+        const err = new Error('timeout');
+        err.code = 'context_timeout';
+        reject(err);
+      }, 5000)),
     ]);
     state.pageContext = freshContext;
     if (freshContext?.url) {
       state.currentPageKey = normalizePageUrl(freshContext.url) || state.currentPageKey;
     }
-  } catch {
+  } catch (err) {
+    if (err?.code === 'context_timeout' || err?.message === 'timeout') {
+      let tab = null;
+      try {
+        tab = await browser.tabs.get(state.currentTabId);
+      } catch {}
+      state.pageContext = {
+        title: tab?.title || '',
+        url: tab?.url || '',
+        textContent: '',
+        wordCount: 0,
+        error: 'Timed out reading page content',
+      };
+      return;
+    }
     if (retries > 0) {
       // Content script may not be injected yet — retry after a short delay
       await new Promise(r => setTimeout(r, 500));
@@ -629,6 +652,178 @@ function sanitizeUrl(value) {
   return '';
 }
 
+function getYouTubeVideoIdFromUrl(rawUrl) {
+  if (!rawUrl) return '';
+  try {
+    const url = new URL(rawUrl);
+    const host = url.hostname.replace(/^www\./, '');
+    if ((host === 'youtube.com' || host === 'm.youtube.com') && url.pathname === '/watch') {
+      return url.searchParams.get('v') || '';
+    }
+    if (host === 'youtu.be') {
+      return url.pathname.split('/').filter(Boolean)[0] || '';
+    }
+  } catch {}
+  return '';
+}
+
+function parseYouTubeTimeValue(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  if (!raw) return null;
+  if (/^\d+$/.test(raw)) return Number(raw);
+
+  const colonMatch = raw.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+  if (colonMatch) {
+    const first = Number(colonMatch[1]);
+    const second = Number(colonMatch[2]);
+    const third = colonMatch[3] == null ? null : Number(colonMatch[3]);
+    return third == null ? first * 60 + second : first * 3600 + second * 60 + third;
+  }
+
+  let total = 0;
+  let matched = false;
+  for (const match of raw.matchAll(/(\d+(?:\.\d+)?)\s*([hms])/g)) {
+    const amount = Number(match[1]);
+    if (!Number.isFinite(amount)) continue;
+    if (match[2] === 'h') total += amount * 3600;
+    else if (match[2] === 'm') total += amount * 60;
+    else total += amount;
+    matched = true;
+  }
+
+  return matched ? Math.max(0, Math.floor(total)) : null;
+}
+
+function buildYouTubeTimestampUrl(videoId, seconds) {
+  if (!videoId) return '';
+  const startSeconds = Math.max(0, Math.floor(Number(seconds) || 0));
+  return `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}&t=${startSeconds}s`;
+}
+
+function parseYouTubeTimestampLink(rawHref) {
+  if (!rawHref) return null;
+  try {
+    const url = new URL(rawHref, state.pageContext?.url || window.location.href);
+    const videoId = getYouTubeVideoIdFromUrl(url.toString());
+    if (!videoId) return null;
+
+    const hashParams = new URLSearchParams(url.hash.replace(/^#/, ''));
+    const rawTime =
+      url.searchParams.get('t') ||
+      url.searchParams.get('start') ||
+      url.searchParams.get('time_continue') ||
+      hashParams.get('t') ||
+      hashParams.get('start');
+    const seconds = parseYouTubeTimeValue(rawTime);
+    if (seconds == null) return null;
+
+    return {
+      url: url.toString(),
+      videoId,
+      seconds,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function getCurrentYouTubeVideoId() {
+  return getYouTubeVideoIdFromUrl(state.pageContext?.url || state.currentPageKey || '');
+}
+
+function createYouTubeTimestampAnchor(videoId, timecode) {
+  const seconds = parseYouTubeTimeValue(timecode);
+  const href = seconds == null ? '' : buildYouTubeTimestampUrl(videoId, seconds);
+  if (!href) return null;
+
+  const anchor = document.createElement('a');
+  anchor.href = href;
+  anchor.target = '_blank';
+  anchor.rel = 'noopener noreferrer';
+  anchor.textContent = timecode;
+  return anchor;
+}
+
+function getSingleTimecodeText(text) {
+  const match = String(text || '').trim().match(/^\[?(\d{1,2}:\d{2}(?::\d{2})?)]?$/);
+  return match ? match[1] : '';
+}
+
+function linkifyYouTubeTimecodesInElement(root) {
+  const videoId = getCurrentYouTubeVideoId();
+  if (!videoId || !root) return;
+
+  for (const codeEl of Array.from(root.querySelectorAll('code'))) {
+    if (codeEl.closest('pre')) continue;
+    const timecode = getSingleTimecodeText(codeEl.textContent);
+    if (!timecode) continue;
+    const anchor = createYouTubeTimestampAnchor(videoId, timecode);
+    if (anchor) codeEl.replaceWith(anchor);
+  }
+
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      const text = node.textContent || '';
+      if (!/\d{1,2}:\d{2}/.test(text)) return NodeFilter.FILTER_REJECT;
+      const parent = node.parentElement;
+      if (!parent || parent.closest('a, pre, code')) return NodeFilter.FILTER_REJECT;
+      return NodeFilter.FILTER_ACCEPT;
+    },
+  });
+
+  const nodes = [];
+  while (walker.nextNode()) nodes.push(walker.currentNode);
+
+  for (const node of nodes) {
+    const text = node.textContent || '';
+    const fragment = document.createDocumentFragment();
+    const re = /\[?(\d{1,2}:\d{2}(?::\d{2})?)]?/g;
+    let lastIndex = 0;
+    let changed = false;
+    for (const match of text.matchAll(re)) {
+      const start = match.index || 0;
+      const full = match[0];
+      const timecode = match[1];
+      const anchor = createYouTubeTimestampAnchor(videoId, timecode);
+      if (!anchor) continue;
+      fragment.append(document.createTextNode(text.slice(lastIndex, start)));
+      fragment.append(anchor);
+      lastIndex = start + full.length;
+      changed = true;
+    }
+    if (!changed) continue;
+    fragment.append(document.createTextNode(text.slice(lastIndex)));
+    node.replaceWith(fragment);
+  }
+}
+
+async function seekCurrentYouTubeTimestamp(linkInfo) {
+  if (!linkInfo || state.currentTabId == null) return false;
+  let currentTabUrl = '';
+  try {
+    const tab = await browser.tabs.get(state.currentTabId);
+    currentTabUrl = tab?.url || '';
+  } catch {}
+
+  const currentVideoId =
+    getYouTubeVideoIdFromUrl(currentTabUrl) ||
+    getYouTubeVideoIdFromUrl(state.pageContext?.url || state.currentPageKey || '');
+  const isCurrentVideo = !!currentVideoId && currentVideoId === linkInfo.videoId;
+
+  if (!isCurrentVideo) return false;
+
+  try {
+    const response = await browser.runtime.sendMessage({
+      type: 'seekYouTubeVideo',
+      tabId: state.currentTabId,
+      seconds: linkInfo.seconds,
+      url: linkInfo.url,
+    });
+    if (response?.ok) return true;
+  } catch {}
+  return false;
+}
+
 function sanitizeHtmlNode(node) {
   if (node.nodeType === Node.TEXT_NODE) {
     return document.createTextNode(node.textContent || '');
@@ -708,6 +903,11 @@ function createSanitizedFragment(html) {
 
 function setSanitizedHtml(element, html) {
   element.replaceChildren(createSanitizedFragment(html));
+}
+
+function setAssistantBubbleHtml(element, html) {
+  setSanitizedHtml(element, html);
+  linkifyYouTubeTimecodesInElement(element);
 }
 
 function renderUserTechMarker() {
@@ -828,6 +1028,10 @@ function linkifySourceTags(text) {
   });
 }
 
+function linkifyAssistantContent(text) {
+  return linkifySourceTags(text);
+}
+
 async function scrollToSourceFromChat(sourceId) {
   const id = String(sourceId || '').trim().toLowerCase();
   if (!id) return;
@@ -896,7 +1100,7 @@ function renderMessage(message, index) {
       setSanitizedHtml(bubble, `${escapeHtml(message.content)}${message.technicalModeUsed ? renderUserTechMarker() : ''}`);
     }
   } else if (message.role === 'assistant') {
-    setSanitizedHtml(bubble, `${renderAssistantContextBadge(message.contextMode)}${renderMarkdown(linkifySourceTags(message.content))}`);
+    setAssistantBubbleHtml(bubble, `${renderAssistantContextBadge(message.contextMode)}${renderMarkdown(linkifyAssistantContent(message.content))}`);
   } else if (message.role === 'notice') {
     setSanitizedHtml(bubble, renderContextLimitNotice(message.details || []));
   } else if (message.role === 'error') {
@@ -1108,7 +1312,7 @@ function renderStreamingBubble(rawText, apiThinking, { partial = true } = {}) {
       : buildThinkingHtml(thinkingText, { streaming: false, elapsed: timing.elapsed || 0 });
   }
   if (contentText) {
-    html += render(linkifySourceTags(contentText));
+    html += render(linkifyAssistantContent(contentText));
   }
   if (!contentText && !thinkingText) {
     const statusText = renderStreamingBubble._statusText || 'Waiting for model...';
@@ -1139,13 +1343,13 @@ function createStreamingElement(stream) {
     renderStreamingBubble._timing = { start: stream.thinkingStartTime, elapsed: stream.thinkingElapsed };
     renderStreamingBubble._contextMode = stream.contextMode || '';
     renderStreamingBubble._statusText = stream.statusText || '';
-    setSanitizedHtml(bubble, renderStreamingBubble(stream.streamedText, stream.streamedThinking));
+    setAssistantBubbleHtml(bubble, renderStreamingBubble(stream.streamedText, stream.streamedThinking));
     renderStreamingBubble._timing = null;
     renderStreamingBubble._contextMode = '';
     renderStreamingBubble._statusText = '';
   } else if (stream.statusText) {
     renderStreamingBubble._statusText = stream.statusText;
-    setSanitizedHtml(bubble, renderStreamingBubble('', ''));
+    setAssistantBubbleHtml(bubble, renderStreamingBubble('', ''));
     renderStreamingBubble._statusText = '';
   }
 
@@ -1165,7 +1369,7 @@ function updateStreamingDOM(stream) {
   renderStreamingBubble._timing = { start: stream.thinkingStartTime, elapsed: stream.thinkingElapsed };
   renderStreamingBubble._contextMode = stream.contextMode || '';
   renderStreamingBubble._statusText = stream.statusText || '';
-  setSanitizedHtml(bubble, renderStreamingBubble(stream.streamedText, stream.streamedThinking));
+  setAssistantBubbleHtml(bubble, renderStreamingBubble(stream.streamedText, stream.streamedThinking));
   renderStreamingBubble._timing = null;
   renderStreamingBubble._contextMode = '';
   renderStreamingBubble._statusText = '';
@@ -1181,11 +1385,14 @@ async function startStreaming() {
 
   // Re-distill the page so the AI sees the current DOM state
   try {
-    const freshContext = await browser.runtime.sendMessage({
-      type: 'getDistilledContent',
-      tabId,
-      options: { includeTechnicalContext: !!state.technicalAnalysisMode },
-    });
+    const freshContext = await Promise.race([
+      browser.runtime.sendMessage({
+        type: 'getDistilledContent',
+        tabId,
+        options: { includeTechnicalContext: !!state.technicalAnalysisMode },
+      }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 12000)),
+    ]);
     if (freshContext && !freshContext.error) {
       state.pageContext = freshContext;
       updatePageInfo();
@@ -1322,7 +1529,7 @@ function finishStream(tabId, aborted) {
       if (stream.streamedText) {
         renderStreamingBubble._timing = { start: stream.thinkingStartTime, elapsed: stream.thinkingElapsed };
         renderStreamingBubble._contextMode = stream.contextMode || '';
-        setSanitizedHtml(bubble, renderStreamingBubble(stream.streamedText, stream.streamedThinking, { partial: false }));
+        setAssistantBubbleHtml(bubble, renderStreamingBubble(stream.streamedText, stream.streamedThinking, { partial: false }));
         renderStreamingBubble._timing = null;
         renderStreamingBubble._contextMode = '';
 
@@ -1426,16 +1633,25 @@ function bindEvents() {
     const link = e.target?.closest?.('a[href^="source:"]');
     const groupLink = e.target?.closest?.('a[href^="source-group:"]');
     const targetLink = link || groupLink;
-    if (!targetLink) return;
-    e.preventDefault();
-    const href = targetLink.getAttribute('href') || '';
-    if (href.startsWith('source-group:')) {
-      const groupLabel = href.replace(/^source-group:/i, '');
-      void scrollToSourceGroupFromChat(groupLabel);
+    if (targetLink) {
+      e.preventDefault();
+      const href = targetLink.getAttribute('href') || '';
+      if (href.startsWith('source-group:')) {
+        const groupLabel = href.replace(/^source-group:/i, '');
+        void scrollToSourceGroupFromChat(groupLabel);
+        return;
+      }
+      const sourceId = href.replace(/^source:/i, '');
+      void scrollToSourceFromChat(sourceId);
       return;
     }
-    const sourceId = href.replace(/^source:/i, '');
-    void scrollToSourceFromChat(sourceId);
+
+    const externalLink = e.target?.closest?.('a[href]');
+    const timestampLink = parseYouTubeTimestampLink(externalLink?.getAttribute('href') || '');
+    if (timestampLink) {
+      e.preventDefault();
+      void seekCurrentYouTubeTimestamp(timestampLink);
+    }
   });
   scrollToBottomBtn.addEventListener('click', () => {
     shouldAutoScroll = true;
@@ -1483,7 +1699,9 @@ function bindEvents() {
         state.currentPageKey = nextPageKey;
         void restoreTabState(tabId);
       } else {
-        fetchPageContext();
+        if (!pageContextMatchesCurrentPage()) {
+          fetchPageContext();
+        }
       }
     }
   });

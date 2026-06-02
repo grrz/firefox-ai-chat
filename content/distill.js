@@ -1106,6 +1106,151 @@
       new URLSearchParams(location.search).has('v');
   }
 
+  const YOUTUBE_TRANSCRIPT_PRIMARY_TIMEOUT_MS = 5000;
+  const YOUTUBE_TRANSCRIPT_CAPTION_TIMEOUT_MS = 5000;
+  const YOUTUBE_TRANSCRIPT_DOM_TIMEOUT_MS = 4500;
+  const YOUTUBE_TRANSCRIPT_DOM_POLL_MS = 2500;
+
+  function withTimeout(promise, timeoutMs, fallbackValue = null) {
+    return Promise.race([
+      promise,
+      new Promise(resolve => setTimeout(() => resolve(fallbackValue), timeoutMs)),
+    ]);
+  }
+
+  function parseTimestampToSeconds(value) {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return Math.max(0, Math.floor(value));
+    }
+
+    const normalized = normalizeTranscriptText(value).toLowerCase();
+    if (!normalized) return null;
+
+    const colonMatch = normalized.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+    if (colonMatch) {
+      const first = Number(colonMatch[1]);
+      const second = Number(colonMatch[2]);
+      const third = colonMatch[3] == null ? null : Number(colonMatch[3]);
+      if (third == null) return first * 60 + second;
+      return first * 3600 + second * 60 + third;
+    }
+
+    let total = 0;
+    let matched = false;
+    const unitRe = /(\d+(?:\.\d+)?)\s*(hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)\b/g;
+    for (const match of normalized.matchAll(unitRe)) {
+      const amount = Number(match[1]);
+      if (!Number.isFinite(amount)) continue;
+      const unit = match[2][0];
+      if (unit === 'h') total += amount * 3600;
+      else if (unit === 'm') total += amount * 60;
+      else total += amount;
+      matched = true;
+    }
+
+    return matched ? Math.max(0, Math.floor(total)) : null;
+  }
+
+  function formatTimecode(totalSeconds) {
+    const safeSeconds = Math.max(0, Math.floor(Number(totalSeconds) || 0));
+    const hours = Math.floor(safeSeconds / 3600);
+    const minutes = Math.floor((safeSeconds % 3600) / 60);
+    const seconds = safeSeconds % 60;
+    if (hours > 0) {
+      return `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+    }
+    return `${minutes}:${String(seconds).padStart(2, '0')}`;
+  }
+
+  function buildYouTubeTimestampUrl(videoId, startSeconds) {
+    if (!videoId) return '';
+    const seconds = Math.max(0, Math.floor(Number(startSeconds) || 0));
+    return `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}&t=${seconds}s`;
+  }
+
+  function normalizeTranscriptLine(line) {
+    if (typeof line === 'string') {
+      return { text: line, startSeconds: null, timestamp: '' };
+    }
+    if (!line || typeof line !== 'object') {
+      return { text: '', startSeconds: null, timestamp: '' };
+    }
+    const text = String(line.text || '').trim();
+    const parsedSeconds = parseTimestampToSeconds(line.startSeconds ?? line.timestamp);
+    return {
+      text,
+      startSeconds: parsedSeconds,
+      timestamp: line.timestamp || (parsedSeconds != null ? formatTimecode(parsedSeconds) : ''),
+    };
+  }
+
+  function formatTranscriptContextLine(line) {
+    const normalized = normalizeTranscriptLine(line);
+    if (!normalized.text) return '';
+    if (normalized.startSeconds == null) return normalized.text;
+    const timecode = normalized.timestamp || formatTimecode(normalized.startSeconds);
+    return `- ${timecode} (t=${normalized.startSeconds}s) ${normalized.text}`;
+  }
+
+  function getTextFromRenderer(value) {
+    if (!value) return '';
+    if (typeof value === 'string') return value;
+    if (typeof value.simpleText === 'string') return value.simpleText;
+    if (Array.isArray(value.runs)) return value.runs.map(run => run?.text || '').join('');
+    return '';
+  }
+
+  function parseYouTubeTimestampFromUrl(rawUrl) {
+    if (!rawUrl) return null;
+    try {
+      const url = new URL(rawUrl);
+      const hashParams = new URLSearchParams(url.hash.replace(/^#/, ''));
+      return parseTimestampToSeconds(
+        url.searchParams.get('t') ||
+        url.searchParams.get('start') ||
+        url.searchParams.get('time_continue') ||
+        hashParams.get('t') ||
+        hashParams.get('start')
+      );
+    } catch {
+      return null;
+    }
+  }
+
+  function seekCurrentYouTubeVideo(seconds, rawUrl = '') {
+    const startSeconds = parseTimestampToSeconds(seconds) ?? parseYouTubeTimestampFromUrl(rawUrl);
+    if (startSeconds == null) return { ok: false, error: 'invalid timestamp' };
+
+    const video = document.querySelector('video');
+    if (!isYouTubeWatchPage() && !video) return { ok: false, error: 'not a YouTube watch page' };
+
+    let seeked = false;
+    const player = document.getElementById('movie_player') || document.querySelector('#movie_player');
+    const unwrappedPlayer = player?.wrappedJSObject || player;
+
+    try {
+      if (typeof unwrappedPlayer?.seekTo === 'function') {
+        unwrappedPlayer.seekTo(startSeconds, true);
+        seeked = true;
+      }
+    } catch {}
+
+    try {
+      if (video) {
+        if (typeof video.fastSeek === 'function') video.fastSeek(startSeconds);
+        else video.currentTime = startSeconds;
+        video.dispatchEvent(new Event('timeupdate', { bubbles: true }));
+        seeked = true;
+      }
+    } catch (err) {
+      if (!seeked) return { ok: false, error: err?.message || 'seek failed' };
+    }
+
+    if (!seeked) return { ok: false, error: 'video element not found' };
+
+    return { ok: true, seconds: startSeconds };
+  }
+
   function parseJSONFromText(text, startIdx) {
     // String-aware brace counting — handles {} inside JSON string values
     let depth = 0;
@@ -1320,25 +1465,60 @@
     return events;
   }
 
+  function readTranscriptTimestampFromSegment(seg) {
+    if (!seg) return '';
+
+    const explicitSelectors = [
+      'yt-formatted-string#timestamp',
+      '#timestamp',
+      '.segment-timestamp',
+      '[class*="timestamp"]',
+      '[class*="start-offset"]',
+      '[id*="timestamp"]',
+    ];
+
+    for (const selector of explicitSelectors) {
+      const candidates = Array.from(seg.querySelectorAll(selector));
+      for (const el of candidates) {
+        const text = normalizeTranscriptText(el.innerText || el.textContent);
+        if (isTranscriptTimestampLike(text)) return text;
+      }
+    }
+
+    const rawLines = (seg.innerText ?? seg.textContent ?? '')
+      .split('\n')
+      .map(normalizeTranscriptText)
+      .filter(Boolean);
+    return rawLines.find(isTranscriptTimestampLike) || '';
+  }
+
   /**
    * Fetch a URL via the background script as fallback.
    */
   async function bgFetchText(url) {
     try {
-      const result = await browser.runtime.sendMessage({ type: 'fetchText', url });
+      const result = await withTimeout(
+        browser.runtime.sendMessage({ type: 'fetchText', url, timeoutMs: YOUTUBE_TRANSCRIPT_CAPTION_TIMEOUT_MS }),
+        YOUTUBE_TRANSCRIPT_CAPTION_TIMEOUT_MS + 500,
+        null
+      );
       return result?.text || '';
     } catch {
       return '';
     }
   }
 
-  async function contentFetchText(url, { credentials = 'include' } = {}) {
+  async function contentFetchText(url, { credentials = 'include', timeoutMs = YOUTUBE_TRANSCRIPT_CAPTION_TIMEOUT_MS } = {}) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const resp = await fetch(url, { credentials, cache: 'no-store' });
+      const resp = await fetch(url, { credentials, cache: 'no-store', signal: controller.signal });
       const text = await resp.text();
       return { text: text || '', status: resp.status || 0 };
     } catch {
       return { text: '', status: 0 };
+    } finally {
+      clearTimeout(timeoutId);
     }
   }
 
@@ -1482,7 +1662,7 @@
     const chip = findTranscriptChipButton();
     if (!chip || isTranscriptChipSelected(chip)) return false;
     clickElement(resolveClickable(chip));
-    await sleep(1200);
+    await sleep(500);
     return true;
   }
 
@@ -1567,7 +1747,13 @@
       const text = extractTranscriptTextFromSegment(seg);
       if (!text) continue;
 
-      lines.push(text);
+      const timestamp = readTranscriptTimestampFromSegment(seg);
+      const startSeconds = parseTimestampToSeconds(timestamp);
+      lines.push({
+        text,
+        startSeconds,
+        timestamp: startSeconds != null ? formatTimecode(startSeconds) : timestamp,
+      });
       wordCount += text.split(/\s+/).length;
       if (wordCount >= WORD_LIMIT) break;
     }
@@ -1587,7 +1773,12 @@
           if (!isTranscriptTimestampLike(rawLines[i])) continue;
           const text = rawLines[i + 1] || '';
           if (!text || isTranscriptTimestampLike(text)) continue;
-          lines.push(text);
+          const startSeconds = parseTimestampToSeconds(rawLines[i]);
+          lines.push({
+            text,
+            startSeconds,
+            timestamp: startSeconds != null ? formatTimecode(startSeconds) : rawLines[i],
+          });
           wordCount += text.split(/\s+/).length;
           if (wordCount >= WORD_LIMIT) break;
         }
@@ -1614,7 +1805,7 @@
     const directButton = findDedicatedTranscriptButton();
     if (directButton) {
       clickElement(resolveClickable(directButton));
-      await sleep(1200);
+      await sleep(700);
       await activateTranscriptChipIfPresent();
       if (parseTranscriptFromDOM()) return;
     }
@@ -1642,7 +1833,7 @@
       })
       .filter((c) => c.score >= 0)
       .sort((a, b) => b.score - a.score)
-      .slice(0, 5);
+      .slice(0, 2);
 
     if (!candidates.length) {
       // No transcript control found in the current view.
@@ -1650,7 +1841,7 @@
       for (const c of candidates) {
         const target = resolveClickable(c.el);
         clickElement(target);
-        await sleep(900);
+        await sleep(600);
         await activateTranscriptChipIfPresent();
         if (parseTranscriptFromDOM()) return;
       }
@@ -1682,12 +1873,12 @@
         })
         .filter((c) => c.score >= 0)
         .sort((a, b) => b.score - a.score)
-        .slice(0, 5);
+        .slice(0, 2);
 
       for (const c of retryCandidates) {
         const target = resolveClickable(c.el);
         clickElement(target);
-        await sleep(900);
+        await sleep(600);
         await activateTranscriptChipIfPresent();
         if (parseTranscriptFromDOM()) return;
       }
@@ -1700,7 +1891,7 @@
     try {
       await tryOpenTranscriptPanel();
       // Panel may be visible but segments not yet rendered — poll until they appear.
-      const deadline = Date.now() + 12000;
+      const deadline = Date.now() + YOUTUBE_TRANSCRIPT_DOM_POLL_MS;
       while (Date.now() < deadline) {
         await activateTranscriptChipIfPresent();
         parsed = parseTranscriptFromDOM();
@@ -1752,15 +1943,42 @@
         const WORD_LIMIT = 10000;
 
         for (const group of body.cueGroups) {
-          const cues = group?.transcriptCueGroupRenderer?.cues;
+          const groupRenderer = group?.transcriptCueGroupRenderer;
+          const cues = groupRenderer?.cues;
           if (!cues) continue;
           for (const cue of cues) {
             const cr = cue?.transcriptCueRenderer;
             if (!cr) continue;
-            const text = (cr.cue?.simpleText || '').trim();
+            const text = getTextFromRenderer(cr.cue).trim();
             if (!text) continue;
 
-            lines.push(text);
+            let startSeconds = null;
+            for (const msValue of [
+              cr.startOffsetMs,
+              cr.startMs,
+              cr.startTimeMs,
+              groupRenderer.startOffsetMs,
+              groupRenderer.startMs,
+              groupRenderer.startTimeMs,
+            ]) {
+              const ms = Number(msValue);
+              if (Number.isFinite(ms)) {
+                startSeconds = Math.max(0, Math.floor(ms / 1000));
+                break;
+              }
+            }
+            if (startSeconds == null) {
+              startSeconds = parseTimestampToSeconds(
+                getTextFromRenderer(cr.formattedStartOffset) ||
+                getTextFromRenderer(groupRenderer.formattedStartOffset)
+              );
+            }
+
+            lines.push({
+              text,
+              startSeconds,
+              timestamp: startSeconds != null ? formatTimecode(startSeconds) : '',
+            });
             wordCount += text.split(/\s+/).length;
             if (wordCount >= WORD_LIMIT) break;
           }
@@ -1796,20 +2014,25 @@
         visitorData = ytcfgData?.VISITOR_DATA;
       } catch {}
       try {
-        const initialData = await getYTInitialData();
+        const initialData = await withTimeout(getYTInitialData(), 2000, null);
         transcriptParams = extractTranscriptParams(initialData);
       } catch {}
 
-      const result = await browser.runtime.sendMessage({
-        type: 'fetchYouTubeTranscript',
-        videoId,
-        clientVersion,
-        clientName,
-        apiKey,
-        visitorData,
-        transcriptParams,
-        watchUrl: location.href,
-      });
+      const result = await withTimeout(
+        browser.runtime.sendMessage({
+          type: 'fetchYouTubeTranscript',
+          videoId,
+          clientVersion,
+          clientName,
+          apiKey,
+          visitorData,
+          transcriptParams,
+          watchUrl: location.href,
+          timeoutMs: YOUTUBE_TRANSCRIPT_PRIMARY_TIMEOUT_MS,
+        }),
+        YOUTUBE_TRANSCRIPT_PRIMARY_TIMEOUT_MS + 500,
+        null
+      );
 
       if (result?.data) {
         const transcript = parseInnertubeTranscript(result.data);
@@ -1817,22 +2040,31 @@
       }
     } catch {}
 
-    // Secondary fallback: parse transcript from YouTube's own DOM panel.
-    try {
-      const domTranscript = await fetchTranscriptFromDOMPanel();
-      if (domTranscript) return domTranscript;
-    } catch {}
-
-    // Fallback: timedtext API via caption track URLs
+    // Secondary fallback: timedtext API via caption track URLs. This is silent
+    // and usually faster than opening YouTube's transcript panel.
     try {
       const tracks = playerResponse?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
       if (tracks?.length) {
         const chosen = chooseCaptionTrack(tracks);
         if (chosen?.baseUrl) {
-          const events = await fetchCaptionEvents(chosen.baseUrl);
+          const events = await withTimeout(
+            fetchCaptionEvents(chosen.baseUrl),
+            YOUTUBE_TRANSCRIPT_CAPTION_TIMEOUT_MS + 1000,
+            null
+          );
           if (events?.length) return formatTranscriptEvents(events, chosen);
         }
       }
+    } catch {}
+
+    // Last fallback: parse transcript from YouTube's own DOM panel.
+    try {
+      const domTranscript = await withTimeout(
+        fetchTranscriptFromDOMPanel(),
+        YOUTUBE_TRANSCRIPT_DOM_TIMEOUT_MS,
+        null
+      );
+      if (domTranscript) return domTranscript;
     } catch {}
 
     return null;
@@ -1848,7 +2080,14 @@
       const text = event.segs.map(s => s.utf8 || '').join('').trim();
       if (!text) continue;
 
-      lines.push(text);
+      const startSeconds = Number.isFinite(Number(event.tStartMs))
+        ? Math.max(0, Math.floor(Number(event.tStartMs) / 1000))
+        : null;
+      lines.push({
+        text,
+        startSeconds,
+        timestamp: startSeconds != null ? formatTimecode(startSeconds) : '',
+      });
 
       wordCount += text.split(/\s+/).length;
       if (wordCount >= WORD_LIMIT) break;
@@ -1896,8 +2135,13 @@
 
     if (transcript && transcript.lines.length > 0) {
       lines.push(`## Transcript (${transcript.language})`);
+      if (meta.videoId) {
+        lines.push(`Timestamp URL format: https://www.youtube.com/watch?v=${encodeURIComponent(meta.videoId)}&t=SECONDSs`);
+      }
+      lines.push('Transcript lines include compact timecodes and t=SECONDS markers when timing is available.');
       for (const line of transcript.lines) {
-        lines.push(line);
+        const formattedLine = formatTranscriptContextLine(line);
+        if (formattedLine) lines.push(formattedLine);
       }
     } else {
       lines.push('## Transcript');
@@ -2050,6 +2294,9 @@
         wordCount: 0,
         error: err.message,
       }));
+    }
+    if (message.type === 'seekYouTubeVideo') {
+      return seekCurrentYouTubeVideo(message.seconds, message.url || '');
     }
     if (message.type === 'scrollToSource') {
       const selector = String(message.selector || '');

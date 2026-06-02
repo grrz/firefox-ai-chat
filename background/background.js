@@ -8,6 +8,20 @@ import {ProviderError} from './providers/base.js';
 const PAGE_CHATS_STORAGE_KEY = 'pageChatsByUrl';
 const MAX_SAVED_PAGE_CHATS = 50;
 const PORT_KEEPALIVE_INTERVAL_MS = 10000;
+const DEFAULT_FETCH_TIMEOUT_MS = 5000;
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = DEFAULT_FETCH_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
 
 function createProvider(settings) {
   const config = getProviderConfig(settings);
@@ -43,6 +57,11 @@ function buildChatMessages(messages, pageContext, settings, options = {}) {
   if (Array.isArray(pageContext?.comments) && pageContext.comments.length > 0) {
     systemContent += `\n\nA separate user comments/discussion context is available with ${pageContext.comments.length} extracted comments.`;
     systemContent += '\nWhen the user asks about comments, discussion, replies, audience reaction, or commenter opinions, use the comments/discussion context specifically instead of the article body.';
+  }
+  if (isYouTubeWatchUrl(pageContext?.url)) {
+    systemContent += '\n\nYouTube transcript lines may include compact timecodes, for example 1:23 (t=83s), plus a timestamp URL format line.';
+    systemContent += '\nWhen answering about specific moments in the video, include the nearest relevant timecodes from the transcript. Prefer Markdown links using the provided timestamp URL format.';
+    systemContent += '\nDo not invent timestamps that are not present in the page context.';
   }
   if (pageContext?.technicalContext) {
     systemContent += '\n\nTechnical DOM/CSS/JS analysis mode is enabled.';
@@ -639,10 +658,33 @@ browser.runtime.onMessage.addListener(async (message) => {
     }
   }
 
+  if (message.type === 'seekYouTubeVideo') {
+    const tabId = message.tabId;
+    if (tabId == null) return { ok: false, error: 'No tab specified' };
+    const payload = {
+      type: 'seekYouTubeVideo',
+      seconds: message.seconds,
+      url: message.url || '',
+    };
+    try {
+      const response = await browser.tabs.sendMessage(tabId, payload, { frameId: 0 });
+      if (response?.ok) return response;
+    } catch {}
+    try {
+      return await browser.tabs.sendMessage(tabId, payload);
+    } catch (err) {
+      return { ok: false, error: err?.message || 'Seek message failed' };
+    }
+  }
+
   // Proxy fetch for content scripts (background has host_permissions)
   if (message.type === 'fetchText') {
     try {
-      const resp = await fetch(message.url, { credentials: 'include' });
+      const resp = await fetchWithTimeout(
+        message.url,
+        { credentials: 'include' },
+        Math.max(1000, Number(message.timeoutMs) || DEFAULT_FETCH_TIMEOUT_MS)
+      );
       if (!resp.ok) return { text: '', status: resp.status };
       return { text: await resp.text(), status: resp.status };
     } catch (err) {
@@ -676,31 +718,35 @@ browser.runtime.onMessage.addListener(async (message) => {
         ? `https://www.youtube.com/youtubei/v1/get_transcript?key=${encodeURIComponent(apiKey)}`
         : 'https://www.youtube.com/youtubei/v1/get_transcript';
 
-      const resp = await fetch(endpoint, {
-        method: 'POST',
-        credentials: 'include',
-        referrer: watchUrl || `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}`,
-        referrerPolicy: 'origin-when-cross-origin',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-YouTube-Client-Version': ytClientVersion,
-          // WEB maps to client id 1 in request headers.
-          'X-YouTube-Client-Name': ytClientName === 'WEB' ? '1' : ytClientName,
-          ...(visitorData ? { 'X-Goog-Visitor-Id': visitorData } : {}),
-        },
-        body: JSON.stringify({
-          context: {
-            client: {
-              clientName: ytClientName,
-              clientVersion: ytClientVersion,
-              hl: 'en',
-              ...(visitorData ? { visitorData } : {}),
-              ...(watchUrl ? { originalUrl: watchUrl } : {}),
-            },
+      const resp = await fetchWithTimeout(
+        endpoint,
+        {
+          method: 'POST',
+          credentials: 'include',
+          referrer: watchUrl || `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}`,
+          referrerPolicy: 'origin-when-cross-origin',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-YouTube-Client-Version': ytClientVersion,
+            // WEB maps to client id 1 in request headers.
+            'X-YouTube-Client-Name': ytClientName === 'WEB' ? '1' : ytClientName,
+            ...(visitorData ? { 'X-Goog-Visitor-Id': visitorData } : {}),
           },
-          params,
-        }),
-      });
+          body: JSON.stringify({
+            context: {
+              client: {
+                clientName: ytClientName,
+                clientVersion: ytClientVersion,
+                hl: 'en',
+                ...(visitorData ? { visitorData } : {}),
+                ...(watchUrl ? { originalUrl: watchUrl } : {}),
+              },
+            },
+            params,
+          }),
+        },
+        Math.max(1000, Number(message.timeoutMs) || DEFAULT_FETCH_TIMEOUT_MS)
+      );
       if (!resp.ok) return { error: `HTTP ${resp.status}` };
       const data = await resp.json();
       return { data };
