@@ -229,6 +229,72 @@ export class LMStudioProvider extends OpenAIProvider {
       {
         type: 'function',
         function: {
+          name: 'search_resources',
+          description: 'Search fetched external page resources such as JS, CSS, JSON, HTML, and manifests.',
+          parameters: {
+            type: 'object',
+            properties: {
+              query: { type: 'string' },
+              max_results: { type: 'integer', minimum: 1, maximum: 12 },
+            },
+            required: ['query'],
+          },
+        },
+      },
+      {
+        type: 'function',
+        function: {
+          name: 'get_resource_chunk',
+          description: 'Fetch a contiguous text chunk from a fetched external page resource by id or URL.',
+          parameters: {
+            type: 'object',
+            properties: {
+              id: { type: 'string', description: 'Resource id such as r3.' },
+              url: { type: 'string', description: 'Resource URL, used when id is unknown.' },
+              offset: { type: 'integer', minimum: 0 },
+              length: { type: 'integer', minimum: 200, maximum: 12000 },
+            },
+          },
+        },
+      },
+      {
+        type: 'function',
+        function: {
+          name: 'list_js_symbols',
+          description: 'List indexed JavaScript symbols from fetched page resources. Use this before requesting a specific function, class, method, or constant body.',
+          parameters: {
+            type: 'object',
+            properties: {
+              query: { type: 'string', description: 'Optional search over symbol name, signature, URL, and kind.' },
+              kind: { type: 'string', description: 'Optional kind filter: function, class, method, const, let, or var.' },
+              resource_id: { type: 'string', description: 'Optional resource id such as r3.' },
+              exported_only: { type: 'boolean' },
+              offset: { type: 'integer', minimum: 0 },
+              count: { type: 'integer', minimum: 1, maximum: 100 },
+            },
+          },
+        },
+      },
+      {
+        type: 'function',
+        function: {
+          name: 'get_js_symbol',
+          description: 'Return the source slice for a specific JavaScript symbol: a full function, class, method, or variable declaration when available.',
+          parameters: {
+            type: 'object',
+            properties: {
+              symbol_id: { type: 'string', description: 'Exact symbol id from list_js_symbols, for example r2:sym17.' },
+              name: { type: 'string', description: 'Symbol name if symbol_id is unknown.' },
+              resource_id: { type: 'string', description: 'Resource id such as r3, recommended when searching by name.' },
+              kind: { type: 'string', description: 'Optional kind filter.' },
+              max_chars: { type: 'integer', minimum: 1000, maximum: 120000 },
+            },
+          },
+        },
+      },
+      {
+        type: 'function',
+        function: {
           name: 'search_comments',
           description: 'Search extracted user comments/discussion and return matching comment excerpts.',
           parameters: {
@@ -280,6 +346,93 @@ export class LMStudioProvider extends OpenAIProvider {
       .filter((comment) => comment.text.trim());
   }
 
+  getPageResources(pageContext) {
+    const resources = pageContext?.technicalContext?.resources;
+    const inventory = Array.isArray(resources?.inventory) ? resources.inventory : [];
+    const fetched = Array.isArray(resources?.fetched) ? resources.fetched : [];
+    const byUrl = new Map();
+    const byId = new Map();
+
+    for (const resource of inventory) {
+      const item = {
+        id: String(resource?.id || ''),
+        url: String(resource?.url || ''),
+        kind: String(resource?.kind || 'resource'),
+        sources: Array.isArray(resource?.sources) ? resource.sources : [],
+        contentType: String(resource?.contentType || resource?.type || ''),
+        text: '',
+        truncated: false,
+        jsSymbols: [],
+        jsSymbolCount: 0,
+        jsSymbolsTruncated: false,
+      };
+      if (item.url) byUrl.set(item.url, item);
+      if (item.id) byId.set(item.id, item);
+    }
+
+    for (const resource of fetched) {
+      const url = String(resource?.url || '');
+      const id = String(resource?.id || '');
+      const item = (url && byUrl.get(url)) || (id && byId.get(id)) || {
+        id,
+        url,
+        kind: String(resource?.kind || 'resource'),
+        sources: Array.isArray(resource?.sources) ? resource.sources : [],
+        contentType: '',
+        text: '',
+        truncated: false,
+      };
+      item.id = item.id || id;
+      item.url = item.url || url;
+      item.kind = String(resource?.kind || item.kind || 'resource');
+      item.contentType = String(resource?.contentType || item.contentType || '');
+      item.text = String(resource?.text || '');
+      item.truncated = !!resource?.truncated;
+      item.jsSymbols = Array.isArray(resource?.jsSymbols) ? resource.jsSymbols : (item.jsSymbols || []);
+      item.jsSymbolCount = Number(resource?.jsSymbolCount) || item.jsSymbols.length || 0;
+      item.jsSymbolsTruncated = !!resource?.jsSymbolsTruncated;
+      if (item.url) byUrl.set(item.url, item);
+      if (item.id) byId.set(item.id, item);
+    }
+
+    return Array.from(byUrl.values()).filter((resource) => resource.url);
+  }
+
+  getJsSymbols(pageContext) {
+    return this.getPageResources(pageContext).flatMap((resource) => {
+      const symbols = Array.isArray(resource.jsSymbols) ? resource.jsSymbols : [];
+      return symbols.map((symbol) => ({
+        ...symbol,
+        resourceId: symbol.resourceId || resource.id,
+        resourceUrl: symbol.resourceUrl || resource.url,
+      }));
+    });
+  }
+
+  findJsSymbol(args, pageContext) {
+    const symbols = this.getJsSymbols(pageContext);
+    const symbolId = String(args?.symbol_id || '').trim();
+    const name = String(args?.name || '').trim();
+    const resourceId = String(args?.resource_id || '').trim();
+    const kind = String(args?.kind || '').trim().toLowerCase();
+
+    if (symbolId) {
+      const exact = symbols.find((symbol) => symbol.id === symbolId);
+      return exact ? { symbol: exact, candidates: [] } : { symbol: null, candidates: [] };
+    }
+
+    const candidates = symbols.filter((symbol) => {
+      if (resourceId && symbol.resourceId !== resourceId) return false;
+      if (kind && String(symbol.kind || '').toLowerCase() !== kind) return false;
+      if (!name) return true;
+      return String(symbol.name || '').toLowerCase() === name.toLowerCase();
+    });
+    return {
+      symbol: candidates.length === 1 ? candidates[0] : null,
+      candidates,
+    };
+  }
+
   runToolCall(name, args, pageContext) {
     const text = this.getPageText(pageContext);
     if (name === 'search_page') {
@@ -307,6 +460,170 @@ export class LMStudioProvider extends OpenAIProvider {
         length,
         total_length: text.length,
         chunk,
+      };
+    }
+    if (name === 'search_resources') {
+      const query = String(args?.query || '').trim();
+      const resources = this.getPageResources(pageContext);
+      if (!query) return { query, total_resources: resources.length, matches: [] };
+      const maxResults = Math.min(12, Math.max(1, Number(args?.max_results) || 6));
+      const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+      const matches = [];
+      for (const resource of resources) {
+        if (matches.length >= maxResults) break;
+        const haystack = [
+          resource.id,
+          resource.url,
+          resource.kind,
+          resource.contentType,
+          ...(resource.sources || []),
+          resource.text,
+        ].join(' ').toLowerCase();
+        if (!terms.every((term) => haystack.includes(term))) continue;
+        const lowerText = resource.text.toLowerCase();
+        const firstTermIndex = terms
+          .map((term) => lowerText.indexOf(term))
+          .filter((idx) => idx >= 0)
+          .sort((a, b) => a - b)[0];
+        const offset = Math.max(0, Number(firstTermIndex) || 0);
+        const excerptStart = Math.max(0, offset - 160);
+        const excerpt = resource.text
+          ? resource.text.slice(excerptStart, excerptStart + 900)
+          : '';
+        matches.push({
+          id: resource.id,
+          url: resource.url,
+          kind: resource.kind,
+          contentType: resource.contentType,
+          truncated: resource.truncated,
+          textLength: resource.text.length,
+          offset,
+          excerpt,
+        });
+      }
+      return { query, total_resources: resources.length, matches };
+    }
+    if (name === 'get_resource_chunk') {
+      const id = String(args?.id || '').trim();
+      const url = String(args?.url || '').trim();
+      const resources = this.getPageResources(pageContext);
+      const resource = resources.find((item) => (
+        (id && item.id === id) ||
+        (url && item.url === url)
+      ));
+      if (!resource) {
+        return {
+          id,
+          url,
+          total_resources: resources.length,
+          error: 'Resource not found or was not fetched as text.',
+        };
+      }
+      const offset = Math.max(0, Number(args?.offset) || 0);
+      const length = Math.min(12000, Math.max(200, Number(args?.length) || 4000));
+      return {
+        id: resource.id,
+        url: resource.url,
+        kind: resource.kind,
+        contentType: resource.contentType,
+        offset,
+        length,
+        total_length: resource.text.length,
+        truncated: resource.truncated,
+        chunk: resource.text.slice(offset, offset + length),
+      };
+    }
+    if (name === 'list_js_symbols') {
+      const query = String(args?.query || '').trim().toLowerCase();
+      const kind = String(args?.kind || '').trim().toLowerCase();
+      const resourceId = String(args?.resource_id || '').trim();
+      const exportedOnly = !!args?.exported_only;
+      const offset = Math.max(0, Number(args?.offset) || 0);
+      const count = Math.min(100, Math.max(1, Number(args?.count) || 40));
+      const symbols = this.getJsSymbols(pageContext).filter((symbol) => {
+        if (resourceId && symbol.resourceId !== resourceId) return false;
+        if (kind && String(symbol.kind || '').toLowerCase() !== kind) return false;
+        if (exportedOnly && !symbol.exported) return false;
+        if (!query) return true;
+        const haystack = [
+          symbol.id,
+          symbol.name,
+          symbol.kind,
+          symbol.declarationKind,
+          symbol.signature,
+          symbol.resourceId,
+          symbol.resourceUrl,
+        ].join(' ').toLowerCase();
+        return haystack.includes(query);
+      });
+      return {
+        query,
+        kind: kind || '',
+        resource_id: resourceId || '',
+        exported_only: exportedOnly,
+        offset,
+        count,
+        total_symbols: symbols.length,
+        symbols: symbols.slice(offset, offset + count).map((symbol) => ({
+          id: symbol.id,
+          name: symbol.name,
+          kind: symbol.kind,
+          exported: !!symbol.exported,
+          declarationKind: symbol.declarationKind || '',
+          resourceId: symbol.resourceId,
+          resourceUrl: symbol.resourceUrl,
+          lineStart: symbol.lineStart,
+          lineEnd: symbol.lineEnd,
+          signature: symbol.signature,
+        })),
+      };
+    }
+    if (name === 'get_js_symbol') {
+      const resources = this.getPageResources(pageContext);
+      const { symbol, candidates } = this.findJsSymbol(args, pageContext);
+      if (!symbol) {
+        return {
+          error: candidates.length > 1
+            ? 'Multiple matching symbols; call again with symbol_id.'
+            : 'Symbol not found.',
+          candidates: candidates.slice(0, 20).map((candidate) => ({
+            id: candidate.id,
+            name: candidate.name,
+            kind: candidate.kind,
+            resourceId: candidate.resourceId,
+            lineStart: candidate.lineStart,
+            lineEnd: candidate.lineEnd,
+            signature: candidate.signature,
+          })),
+        };
+      }
+      const resource = resources.find((item) => item.id === symbol.resourceId || item.url === symbol.resourceUrl);
+      if (!resource?.text) {
+        return {
+          id: symbol.id,
+          error: 'Symbol resource text is not available.',
+        };
+      }
+      const start = Math.max(0, Number(symbol.start) || 0);
+      const end = Math.min(resource.text.length, Math.max(start, Number(symbol.end) || start));
+      const maxChars = Math.min(120000, Math.max(1000, Number(args?.max_chars) || 60000));
+      const source = resource.text.slice(start, Math.min(end, start + maxChars));
+      return {
+        id: symbol.id,
+        name: symbol.name,
+        kind: symbol.kind,
+        exported: !!symbol.exported,
+        declarationKind: symbol.declarationKind || '',
+        resourceId: symbol.resourceId,
+        resourceUrl: symbol.resourceUrl,
+        lineStart: symbol.lineStart,
+        lineEnd: symbol.lineEnd,
+        start,
+        end,
+        total_chars: end - start,
+        returned_chars: source.length,
+        truncated: source.length < (end - start),
+        source,
       };
     }
     if (name === 'search_comments') {
@@ -372,6 +689,8 @@ export class LMStudioProvider extends OpenAIProvider {
     const toolInstruction = [
       'Use tools for page inspection instead of asking for full context dump.',
       'For questions about comments, discussion, replies, audience reaction, or commenter opinions, use search_comments or get_comments first.',
+      'For questions about external JavaScript, CSS, manifests, API payloads, or page resource implementation details, use search_resources or get_resource_chunk first.',
+      'For questions about a JavaScript function, class, method, or constant, use list_js_symbols first, then get_js_symbol for the exact source slice.',
       'Do not spend time on long internal planning.',
       'If details are missing, call one useful tool immediately; after tool results, answer the user directly.',
     ].join(' ');

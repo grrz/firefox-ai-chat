@@ -353,7 +353,7 @@
     const external = [];
     let inlineCount = 0;
     for (const s of scripts) {
-      const src = (s.getAttribute('src') || '').trim();
+      const src = normalizeResourceUrl(s.getAttribute('src') || '');
       if (!src) {
         inlineCount += 1;
         continue;
@@ -384,6 +384,741 @@
     };
   }
 
+  const RESOURCE_FETCH_LIMITS = {
+    maxResources: 18,
+    maxCharsPerResource: 70000,
+    maxTotalChars: 320000,
+    timeoutMs: 4500,
+  };
+  const MAX_RESOURCE_INVENTORY_ITEMS = 250;
+  const MAX_JS_SYMBOLS_PER_RESOURCE = 600;
+  const MAX_JS_SYMBOLS_IN_PROMPT = 120;
+
+  function normalizeResourceUrl(rawUrl, baseUrl = location.href) {
+    const value = String(rawUrl || '').trim();
+    if (!value) return '';
+    try {
+      const url = new URL(value, baseUrl);
+      if (url.protocol !== 'http:' && url.protocol !== 'https:') return '';
+      return url.toString();
+    } catch {
+      return '';
+    }
+  }
+
+  function splitSrcsetUrls(srcset) {
+    return String(srcset || '')
+      .split(',')
+      .map((part) => part.trim().split(/\s+/)[0])
+      .filter(Boolean);
+  }
+
+  function getLinkResourceKind(linkEl) {
+    const rel = String(linkEl.getAttribute('rel') || '').toLowerCase();
+    const as = String(linkEl.getAttribute('as') || '').toLowerCase();
+    const type = String(linkEl.getAttribute('type') || '').toLowerCase();
+    if (rel.includes('stylesheet')) return 'stylesheet';
+    if (rel.includes('modulepreload')) return 'script';
+    if (as === 'script' || type.includes('javascript') || type.includes('ecmascript')) return 'script';
+    if (as === 'style' || type === 'text/css') return 'stylesheet';
+    if (rel.includes('manifest')) return 'manifest';
+    if (rel.includes('icon') || as === 'image') return 'image';
+    if (as === 'font') return 'font';
+    if (as === 'fetch') return 'fetch';
+    if (as === 'document') return 'document';
+    if (rel.includes('preload') || rel.includes('prefetch')) return as || 'preload';
+    return rel || as || 'link';
+  }
+
+  function mapPerformanceInitiatorType(type) {
+    const value = String(type || '').toLowerCase();
+    if (value === 'css') return 'stylesheet';
+    if (value === 'img' || value === 'image') return 'image';
+    if (value === 'xmlhttprequest') return 'xmlhttprequest';
+    if (value === 'iframe') return 'document';
+    return value || 'resource';
+  }
+
+  function looksLikeTextResourceUrl(rawUrl) {
+    try {
+      const pathname = new URL(rawUrl).pathname.toLowerCase();
+      return /\.(?:cjs|css|csv|html?|js|json|jsx|mjs|map|md|svg|text|ts|tsx|txt|wasm\.map|xml)(?:$|[?#])/.test(pathname);
+    } catch {
+      return false;
+    }
+  }
+
+  function isTextResourceCandidate(resource) {
+    const kind = String(resource?.kind || '').toLowerCase();
+    if (['script', 'stylesheet', 'manifest', 'fetch', 'xmlhttprequest', 'document', 'preload'].includes(kind)) return true;
+    if (looksLikeTextResourceUrl(resource?.url || '')) return true;
+    const type = String(resource?.type || '').toLowerCase();
+    return type.startsWith('text/') ||
+      type.includes('json') ||
+      type.includes('javascript') ||
+      type.includes('ecmascript') ||
+      type.includes('xml') ||
+      type.includes('svg');
+  }
+
+  function addResource(out, byUrl, rawUrl, meta = {}) {
+    const url = normalizeResourceUrl(rawUrl);
+    if (!url) return null;
+    let resource = byUrl.get(url);
+    if (!resource) {
+      resource = {
+        id: '',
+        url,
+        kind: meta.kind || 'resource',
+        sources: [],
+        rel: '',
+        as: '',
+        type: '',
+        media: '',
+        initiatorType: '',
+        transferSize: null,
+        decodedBodySize: null,
+        durationMs: null,
+      };
+      byUrl.set(url, resource);
+      out.push(resource);
+    }
+
+    if (meta.kind && resource.kind === 'resource') resource.kind = meta.kind;
+    if (meta.source && !resource.sources.includes(meta.source)) resource.sources.push(meta.source);
+    for (const key of ['rel', 'as', 'type', 'media', 'initiatorType']) {
+      if (!resource[key] && meta[key]) resource[key] = String(meta[key]);
+    }
+    for (const key of ['transferSize', 'decodedBodySize', 'durationMs']) {
+      if (resource[key] == null && Number.isFinite(meta[key])) resource[key] = meta[key];
+    }
+    resource.fetchCandidate = isTextResourceCandidate(resource);
+    return resource;
+  }
+
+  function collectPageResourceInventory() {
+    const resources = [];
+    const byUrl = new Map();
+
+    for (const el of Array.from(document.querySelectorAll('script[src]'))) {
+      addResource(resources, byUrl, el.getAttribute('src'), {
+        kind: 'script',
+        source: 'script[src]',
+        type: el.getAttribute('type') || '',
+      });
+    }
+
+    for (const el of Array.from(document.querySelectorAll('link[href]'))) {
+      addResource(resources, byUrl, el.getAttribute('href'), {
+        kind: getLinkResourceKind(el),
+        source: 'link[href]',
+        rel: el.getAttribute('rel') || '',
+        as: el.getAttribute('as') || '',
+        type: el.getAttribute('type') || '',
+        media: el.getAttribute('media') || '',
+      });
+    }
+
+    for (const el of Array.from(document.querySelectorAll('img[src], source[src], video[src], audio[src], track[src], iframe[src], embed[src]'))) {
+      addResource(resources, byUrl, el.getAttribute('src'), {
+        kind: el.tagName.toLowerCase() === 'iframe' ? 'document' : el.tagName.toLowerCase(),
+        source: `${el.tagName.toLowerCase()}[src]`,
+        type: el.getAttribute('type') || '',
+      });
+    }
+
+    for (const el of Array.from(document.querySelectorAll('img[srcset], source[srcset]'))) {
+      for (const src of splitSrcsetUrls(el.getAttribute('srcset'))) {
+        addResource(resources, byUrl, src, {
+          kind: 'image',
+          source: `${el.tagName.toLowerCase()}[srcset]`,
+          type: el.getAttribute('type') || '',
+        });
+      }
+    }
+
+    for (const el of Array.from(document.querySelectorAll('video[poster]'))) {
+      addResource(resources, byUrl, el.getAttribute('poster'), {
+        kind: 'image',
+        source: 'video[poster]',
+      });
+    }
+
+    for (const el of Array.from(document.querySelectorAll('object[data]'))) {
+      addResource(resources, byUrl, el.getAttribute('data'), {
+        kind: 'object',
+        source: 'object[data]',
+        type: el.getAttribute('type') || '',
+      });
+    }
+
+    try {
+      for (const entry of performance.getEntriesByType('resource') || []) {
+        addResource(resources, byUrl, entry.name, {
+          kind: mapPerformanceInitiatorType(entry.initiatorType),
+          source: `performance:${entry.initiatorType || 'resource'}`,
+          initiatorType: entry.initiatorType || '',
+          transferSize: Number.isFinite(entry.transferSize) ? entry.transferSize : null,
+          decodedBodySize: Number.isFinite(entry.decodedBodySize) ? entry.decodedBodySize : null,
+          durationMs: Number.isFinite(entry.duration) ? Math.round(entry.duration) : null,
+        });
+      }
+    } catch {}
+
+    return resources.map((resource, index) => ({
+      ...resource,
+      id: `r${index + 1}`,
+      sources: resource.sources.slice(0, 6),
+      fetchCandidate: isTextResourceCandidate(resource),
+    }));
+  }
+
+  async function fetchResourceSnapshots(resources) {
+    const candidates = resources.filter((resource) => resource.fetchCandidate);
+    if (candidates.length === 0) {
+      return {
+        fetched: [],
+        limits: { applied: false, details: [] },
+      };
+    }
+
+    try {
+      const result = await browser.runtime.sendMessage({
+        type: 'fetchPageResources',
+        pageUrl: location.href,
+        resources: candidates.slice(0, RESOURCE_FETCH_LIMITS.maxResources).map((resource) => ({
+          id: resource.id,
+          url: resource.url,
+          kind: resource.kind,
+          sources: resource.sources,
+          rel: resource.rel,
+          as: resource.as,
+          type: resource.type,
+        })),
+        limits: RESOURCE_FETCH_LIMITS,
+      });
+      return result && typeof result === 'object'
+        ? result
+        : { fetched: [], limits: { applied: false, details: [] } };
+    } catch (err) {
+      return {
+        fetched: [],
+        limits: {
+          applied: true,
+          details: [`resource fetch failed: ${err?.message || 'unknown error'}`],
+        },
+      };
+    }
+  }
+
+  function languageForResource(resource) {
+    const url = String(resource?.url || '').toLowerCase();
+    const type = String(resource?.contentType || resource?.type || '').toLowerCase();
+    const kind = String(resource?.kind || '').toLowerCase();
+    if (kind === 'stylesheet' || type.includes('css') || /\.css(?:$|[?#])/.test(url)) return 'css';
+    if (type.includes('json') || /\.(?:json|map)(?:$|[?#])/.test(url)) return 'json';
+    if (type.includes('html') || /\.html?(?:$|[?#])/.test(url)) return 'html';
+    if (type.includes('xml') || /\.xml(?:$|[?#])/.test(url)) return 'xml';
+    if (type.includes('svg') || /\.svg(?:$|[?#])/.test(url)) return 'svg';
+    if (kind === 'script' || type.includes('javascript') || type.includes('ecmascript') || /\.(?:cjs|js|jsx|mjs|ts|tsx)(?:$|[?#])/.test(url)) return 'js';
+    return 'text';
+  }
+
+  function isJavaScriptResource(resource) {
+    return languageForResource(resource) === 'js';
+  }
+
+  function isIdentifierStart(ch) {
+    return /[A-Za-z_$]/.test(ch || '');
+  }
+
+  function isIdentifierPart(ch) {
+    return /[A-Za-z0-9_$]/.test(ch || '');
+  }
+
+  function getLineStarts(text) {
+    const starts = [0];
+    for (let i = 0; i < text.length; i++) {
+      if (text[i] === '\n') starts.push(i + 1);
+    }
+    return starts;
+  }
+
+  function lineColForOffset(lineStarts, offset) {
+    let lo = 0;
+    let hi = lineStarts.length - 1;
+    while (lo <= hi) {
+      const mid = Math.floor((lo + hi) / 2);
+      if (lineStarts[mid] <= offset) lo = mid + 1;
+      else hi = mid - 1;
+    }
+    const lineIndex = Math.max(0, hi);
+    return {
+      line: lineIndex + 1,
+      column: Math.max(0, offset - lineStarts[lineIndex]) + 1,
+    };
+  }
+
+  function readQuotedString(text, start) {
+    const quote = text[start];
+    let i = start + 1;
+    while (i < text.length) {
+      const ch = text[i];
+      if (ch === '\\') {
+        i += 2;
+        continue;
+      }
+      if (ch === quote) return i + 1;
+      i += 1;
+    }
+    return text.length;
+  }
+
+  function readTemplateString(text, start) {
+    let i = start + 1;
+    while (i < text.length) {
+      const ch = text[i];
+      if (ch === '\\') {
+        i += 2;
+        continue;
+      }
+      if (ch === '`') return i + 1;
+      i += 1;
+    }
+    return text.length;
+  }
+
+  function tokenAllowsRegex(prev) {
+    if (!prev) return true;
+    if (prev.type === 'id') {
+      return ['return', 'throw', 'case', 'delete', 'void', 'typeof', 'instanceof', 'in', 'of', 'yield', 'await'].includes(prev.value);
+    }
+    return ['(', '[', '{', ',', ';', ':', '=', '=>', '!', '?', '+', '-', '*', '/', '%', '&', '|', '^', '~'].includes(prev.value);
+  }
+
+  function readRegexLiteral(text, start) {
+    let i = start + 1;
+    let inClass = false;
+    while (i < text.length) {
+      const ch = text[i];
+      if (ch === '\\') {
+        i += 2;
+        continue;
+      }
+      if (ch === '[') inClass = true;
+      else if (ch === ']') inClass = false;
+      else if (ch === '/' && !inClass) {
+        i += 1;
+        while (/[A-Za-z]/.test(text[i] || '')) i += 1;
+        return i;
+      } else if (ch === '\n') {
+        return start + 1;
+      }
+      i += 1;
+    }
+    return text.length;
+  }
+
+  function tokenizeJavaScript(text) {
+    const tokens = [];
+    const curlyStack = [];
+    const parenStack = [];
+    const bracketStack = [];
+    const matching = new Map();
+    let curlyDepth = 0;
+    let parenDepth = 0;
+    let bracketDepth = 0;
+    let i = 0;
+
+    function pushToken(token) {
+      tokens.push({
+        ...token,
+        index: tokens.length,
+        curlyDepth,
+        parenDepth,
+        bracketDepth,
+      });
+      const idx = tokens.length - 1;
+      const value = token.value;
+      if (value === '{') {
+        curlyStack.push(idx);
+        curlyDepth += 1;
+      } else if (value === '}') {
+        const open = curlyStack.pop();
+        if (open != null) {
+          matching.set(open, idx);
+          matching.set(idx, open);
+        }
+      } else if (value === '(') {
+        parenStack.push(idx);
+        parenDepth += 1;
+      } else if (value === ')') {
+        const open = parenStack.pop();
+        if (open != null) {
+          matching.set(open, idx);
+          matching.set(idx, open);
+        }
+      } else if (value === '[') {
+        bracketStack.push(idx);
+        bracketDepth += 1;
+      } else if (value === ']') {
+        const open = bracketStack.pop();
+        if (open != null) {
+          matching.set(open, idx);
+          matching.set(idx, open);
+        }
+      }
+    }
+
+    while (i < text.length) {
+      const ch = text[i];
+      if (/\s/.test(ch)) {
+        i += 1;
+        continue;
+      }
+      if (ch === '/' && text[i + 1] === '/') {
+        i = text.indexOf('\n', i + 2);
+        if (i === -1) break;
+        continue;
+      }
+      if (ch === '/' && text[i + 1] === '*') {
+        const end = text.indexOf('*/', i + 2);
+        i = end === -1 ? text.length : end + 2;
+        continue;
+      }
+      if (ch === '"' || ch === "'") {
+        i = readQuotedString(text, i);
+        continue;
+      }
+      if (ch === '`') {
+        i = readTemplateString(text, i);
+        continue;
+      }
+      if (ch === '/' && tokenAllowsRegex(tokens[tokens.length - 1])) {
+        i = readRegexLiteral(text, i);
+        continue;
+      }
+      if (isIdentifierStart(ch)) {
+        const start = i;
+        i += 1;
+        while (isIdentifierPart(text[i])) i += 1;
+        pushToken({ type: 'id', value: text.slice(start, i), start, end: i });
+        continue;
+      }
+      if (ch === '=' && text[i + 1] === '>') {
+        pushToken({ type: 'punct', value: '=>', start: i, end: i + 2 });
+        i += 2;
+        continue;
+      }
+      if (ch === '}' && curlyDepth > 0) curlyDepth -= 1;
+      if (ch === ')' && parenDepth > 0) parenDepth -= 1;
+      if (ch === ']' && bracketDepth > 0) bracketDepth -= 1;
+      pushToken({ type: 'punct', value: ch, start: i, end: i + 1 });
+      i += 1;
+    }
+
+    return { tokens, matching };
+  }
+
+  function previousSignificantToken(tokens, idx) {
+    return idx > 0 ? tokens[idx - 1] : null;
+  }
+
+  function symbolStartWithPrefixes(tokens, idx) {
+    let startIdx = idx;
+    for (let i = idx - 1; i >= 0; i--) {
+      const value = tokens[i]?.value;
+      if (['export', 'default', 'async', 'static', 'get', 'set'].includes(value)) {
+        startIdx = i;
+        continue;
+      }
+      break;
+    }
+    return tokens[startIdx]?.start ?? tokens[idx].start;
+  }
+
+  function findNextToken(tokens, idx, value, maxDistance = 80) {
+    const end = Math.min(tokens.length, idx + maxDistance);
+    for (let i = idx + 1; i < end; i++) {
+      if (tokens[i].value === value) return i;
+    }
+    return -1;
+  }
+
+  function normalizeSignature(text) {
+    return String(text || '').replace(/\s+/g, ' ').trim().slice(0, 220);
+  }
+
+  function addJsSymbol(symbols, seen, source, lineStarts, resource, rawSymbol) {
+    if (!rawSymbol?.name || rawSymbol.start == null || rawSymbol.end == null) return;
+    if (rawSymbol.end <= rawSymbol.start) return;
+    const key = `${rawSymbol.kind}|${rawSymbol.name}|${rawSymbol.start}|${rawSymbol.end}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    const startLoc = lineColForOffset(lineStarts, rawSymbol.start);
+    const endLoc = lineColForOffset(lineStarts, Math.max(rawSymbol.start, rawSymbol.end - 1));
+    const signatureEnd = Math.min(rawSymbol.end, rawSymbol.bodyStart || rawSymbol.start + 220);
+    const symbol = {
+      id: `${resource.id}:sym${symbols.length + 1}`,
+      resourceId: resource.id,
+      resourceUrl: resource.url,
+      kind: rawSymbol.kind,
+      name: rawSymbol.name,
+      exported: !!rawSymbol.exported,
+      declarationKind: rawSymbol.declarationKind || '',
+      start: rawSymbol.start,
+      end: rawSymbol.end,
+      lineStart: startLoc.line,
+      lineEnd: endLoc.line,
+      columnStart: startLoc.column,
+      columnEnd: endLoc.column,
+      signature: normalizeSignature(source.slice(rawSymbol.start, signatureEnd)),
+    };
+    symbols.push(symbol);
+  }
+
+  function parseFunctionSymbol(tokens, matching, idx) {
+    let cursor = idx + 1;
+    if (tokens[cursor]?.value === '*') cursor += 1;
+    const nameToken = tokens[cursor]?.type === 'id' ? tokens[cursor] : null;
+    let name = nameToken?.value || '';
+    if (!name) {
+      const prev = previousSignificantToken(tokens, idx);
+      if (prev?.type === 'id') name = prev.value;
+    }
+    if (!name) name = '(anonymous)';
+    const parenIdx = findNextToken(tokens, idx, '(', 20);
+    const bodyIdx = parenIdx === -1 ? findNextToken(tokens, idx, '{', 40) : findNextToken(tokens, parenIdx, '{', 80);
+    const closeIdx = bodyIdx === -1 ? -1 : matching.get(bodyIdx);
+    if (bodyIdx === -1 || closeIdx == null) return null;
+    const start = symbolStartWithPrefixes(tokens, idx);
+    const exported = tokens.slice(Math.max(0, idx - 3), idx).some((token) => token.value === 'export');
+    return {
+      kind: 'function',
+      name,
+      exported,
+      start,
+      bodyStart: tokens[bodyIdx].start,
+      end: tokens[closeIdx].end,
+    };
+  }
+
+  function parseClassSymbol(tokens, matching, idx) {
+    const nameToken = tokens[idx + 1]?.type === 'id' ? tokens[idx + 1] : null;
+    const name = nameToken?.value || '(anonymous)';
+    const bodyIdx = findNextToken(tokens, idx, '{', 80);
+    const closeIdx = bodyIdx === -1 ? -1 : matching.get(bodyIdx);
+    if (bodyIdx === -1 || closeIdx == null) return null;
+    const start = symbolStartWithPrefixes(tokens, idx);
+    const exported = tokens.slice(Math.max(0, idx - 3), idx).some((token) => token.value === 'export');
+    return {
+      kind: 'class',
+      name,
+      exported,
+      start,
+      bodyStart: tokens[bodyIdx].start,
+      end: tokens[closeIdx].end,
+      bodyTokenIndex: bodyIdx,
+      closeTokenIndex: closeIdx,
+    };
+  }
+
+  function findStatementEnd(tokens, idx) {
+    const baseCurly = tokens[idx].curlyDepth;
+    const baseParen = tokens[idx].parenDepth;
+    const baseBracket = tokens[idx].bracketDepth;
+    for (let i = idx + 1; i < tokens.length; i++) {
+      const token = tokens[i];
+      if (
+        token.value === ';' &&
+        token.curlyDepth === baseCurly &&
+        token.parenDepth === baseParen &&
+        token.bracketDepth === baseBracket
+      ) {
+        return i;
+      }
+      if (token.value === '}' && token.curlyDepth < baseCurly) return i - 1;
+    }
+    return Math.min(tokens.length - 1, idx + 120);
+  }
+
+  function variableInitializerKind(tokens, startIdx, endIdx) {
+    for (let i = startIdx; i <= endIdx; i++) {
+      if (tokens[i]?.value === '=>') return 'function';
+      if (tokens[i]?.value === 'function') return 'function';
+      if (tokens[i]?.value === 'class') return 'class';
+    }
+    return '';
+  }
+
+  function parseVariableSymbols(tokens, idx) {
+    const declarationKind = tokens[idx].value;
+    const start = symbolStartWithPrefixes(tokens, idx);
+    const endIdx = findStatementEnd(tokens, idx);
+    const exported = tokens.slice(Math.max(0, idx - 3), idx).some((token) => token.value === 'export');
+    const symbols = [];
+    const baseCurly = tokens[idx].curlyDepth;
+    const baseParen = tokens[idx].parenDepth;
+    const baseBracket = tokens[idx].bracketDepth;
+    let expectName = true;
+    let currentName = null;
+    let declaratorStartIdx = idx + 1;
+
+    for (let i = idx + 1; i <= endIdx; i++) {
+      const token = tokens[i];
+      const atBase =
+        token.curlyDepth === baseCurly &&
+        token.parenDepth === baseParen &&
+        token.bracketDepth === baseBracket;
+      if (expectName && token.type === 'id') {
+        currentName = token.value;
+        declaratorStartIdx = i;
+        expectName = false;
+        continue;
+      }
+      if (atBase && (token.value === ',' || token.value === ';' || i === endIdx)) {
+        if (currentName) {
+          const declaratorEndIdx = token.value === ',' || token.value === ';' ? i - 1 : i;
+          const initializerKind = variableInitializerKind(tokens, declaratorStartIdx, declaratorEndIdx);
+          symbols.push({
+            kind: initializerKind || declarationKind,
+            name: currentName,
+            exported,
+            declarationKind,
+            start,
+            bodyStart: tokens[declaratorStartIdx]?.start,
+            end: tokens[endIdx]?.end || tokens[declaratorEndIdx]?.end,
+          });
+        }
+        currentName = null;
+        expectName = true;
+      }
+    }
+
+    return symbols;
+  }
+
+  function parseClassMethods(tokens, matching, classSymbol) {
+    const methods = [];
+    const startIdx = classSymbol.bodyTokenIndex + 1;
+    const endIdx = classSymbol.closeTokenIndex;
+    for (let i = startIdx; i < endIdx; i++) {
+      const token = tokens[i];
+      if (token.type !== 'id') continue;
+      if (token.curlyDepth !== tokens[classSymbol.bodyTokenIndex].curlyDepth + 1) continue;
+
+      let cursor = i;
+      const methodStartIdx = i;
+      while (
+        ['static', 'async', 'get', 'set'].includes(tokens[cursor]?.value) &&
+        tokens[cursor + 1]?.type === 'id' &&
+        (tokens[cursor + 2]?.value === '(' || ['async', 'get', 'set'].includes(tokens[cursor + 1]?.value))
+      ) {
+        cursor += 1;
+      }
+
+      const nameToken = tokens[cursor];
+      const parenIdx = tokens[cursor + 1]?.value === '(' ? cursor + 1 : -1;
+      if (!nameToken || parenIdx === -1) continue;
+      const closeParenIdx = matching.get(parenIdx);
+      const bodyIdx = closeParenIdx == null ? -1 : closeParenIdx + 1;
+      if (tokens[bodyIdx]?.value !== '{') continue;
+      const closeBodyIdx = matching.get(bodyIdx);
+      if (closeBodyIdx == null) continue;
+      methods.push({
+        kind: 'method',
+        name: `${classSymbol.name}.${nameToken.value}`,
+        exported: classSymbol.exported,
+        declarationKind: 'class method',
+        start: symbolStartWithPrefixes(tokens, methodStartIdx),
+        bodyStart: tokens[bodyIdx].start,
+        end: tokens[closeBodyIdx].end,
+      });
+    }
+    return methods;
+  }
+
+  function buildJsSymbolIndexForResource(resource) {
+    const source = String(resource?.text || '');
+    if (!source || !isJavaScriptResource(resource)) {
+      return { symbols: [], totalSymbols: 0, truncated: false };
+    }
+
+    const lineStarts = getLineStarts(source);
+    const { tokens, matching } = tokenizeJavaScript(source);
+    const symbols = [];
+    const seen = new Set();
+    const classSymbols = [];
+
+    for (let i = 0; i < tokens.length && symbols.length < MAX_JS_SYMBOLS_PER_RESOURCE; i++) {
+      const token = tokens[i];
+      if (token.type !== 'id') continue;
+      if (token.value === 'function') {
+        addJsSymbol(symbols, seen, source, lineStarts, resource, parseFunctionSymbol(tokens, matching, i));
+      } else if (token.value === 'class') {
+        const symbol = parseClassSymbol(tokens, matching, i);
+        addJsSymbol(symbols, seen, source, lineStarts, resource, symbol);
+        if (symbol) classSymbols.push(symbol);
+      } else if (['const', 'let', 'var'].includes(token.value)) {
+        for (const symbol of parseVariableSymbols(tokens, i)) {
+          addJsSymbol(symbols, seen, source, lineStarts, resource, symbol);
+          if (symbols.length >= MAX_JS_SYMBOLS_PER_RESOURCE) break;
+        }
+      }
+    }
+
+    for (const classSymbol of classSymbols) {
+      if (symbols.length >= MAX_JS_SYMBOLS_PER_RESOURCE) break;
+      for (const method of parseClassMethods(tokens, matching, classSymbol)) {
+        addJsSymbol(symbols, seen, source, lineStarts, resource, method);
+        if (symbols.length >= MAX_JS_SYMBOLS_PER_RESOURCE) break;
+      }
+    }
+
+    return {
+      symbols,
+      totalSymbols: symbols.length,
+      truncated: symbols.length >= MAX_JS_SYMBOLS_PER_RESOURCE,
+    };
+  }
+
+  function addJsSymbolIndexes(resources) {
+    return resources.map((resource) => {
+      if (!resource?.text || !isJavaScriptResource(resource)) return resource;
+      const index = buildJsSymbolIndexForResource(resource);
+      return {
+        ...resource,
+        jsSymbols: index.symbols,
+        jsSymbolCount: index.totalSymbols,
+        jsSymbolsTruncated: index.truncated,
+      };
+    });
+  }
+
+  async function buildResourceSnapshot() {
+    const inventory = collectPageResourceInventory();
+    const limitedInventory = inventory.slice(0, MAX_RESOURCE_INVENTORY_ITEMS);
+    const limits = [];
+    if (inventory.length > limitedInventory.length) {
+      limits.push(`resource inventory: kept ${limitedInventory.length} of ${inventory.length}`);
+    }
+
+    const fetchedResult = await fetchResourceSnapshots(limitedInventory);
+    if (Array.isArray(fetchedResult?.limits?.details)) {
+      limits.push(...fetchedResult.limits.details);
+    }
+
+    return {
+      totalDiscovered: inventory.length,
+      inventory: limitedInventory,
+      fetched: addJsSymbolIndexes(Array.isArray(fetchedResult?.fetched) ? fetchedResult.fetched : []),
+      limits: {
+        applied: limits.length > 0,
+        details: limits,
+      },
+    };
+  }
+
   function truncateTextWithNotice(text, limit, label) {
     const value = String(text || '');
     if (value.length <= limit) return { text: value, truncated: false };
@@ -410,7 +1145,7 @@
     const stylesRaw = truncateTextWithNotice(styleTags, STYLES_CHAR_LIMIT, 'inline styles');
 
     const externalScripts = Array.from(document.querySelectorAll('script[src]'))
-      .map((el) => (el.getAttribute('src') || '').trim())
+      .map((el) => normalizeResourceUrl(el.getAttribute('src') || ''))
       .filter(Boolean);
     const inlineScriptsRaw = Array.from(document.querySelectorAll('script:not([src])'))
       .map((el, idx) => {
@@ -433,13 +1168,15 @@
     };
   }
 
-  function buildTechnicalContextSection() {
+  async function buildTechnicalContextSection() {
     const root = findMainContent(document.body);
     const dom = summarizeDomTree(root);
     const styles = summarizeStyles();
     const scripts = summarizeScripts();
     const formControls = extractFormState(root).slice(0, 80);
     const deep = buildDeepSnapshot(root);
+    const resources = await buildResourceSnapshot();
+    const fetchedByUrl = new Map((resources.fetched || []).map((resource) => [resource.url, resource]));
 
     const lines = [];
     lines.push('## TECHNICAL CONTEXT (DOM/CSS/JS)');
@@ -477,35 +1214,57 @@
     }
     lines.push('');
 
-    lines.push('### FULL DOM Snapshot (raw HTML)');
-    lines.push('```html');
-    lines.push(deep.domHtml || '<empty>');
-    lines.push('```');
-    lines.push('');
-
-    lines.push('### FULL Inline CSS Snapshot (<style> tags)');
-    lines.push('```css');
-    lines.push(deep.stylesRaw || '/* none */');
-    lines.push('```');
-    lines.push('');
-
-    lines.push('### FULL JS Snapshot');
-    lines.push('- external script src list:');
-    if (deep.externalScripts.length === 0) {
-      lines.push('  - none');
+    lines.push('### Page Resource Inventory');
+    lines.push(`- discovered resources: ${resources.totalDiscovered}`);
+    lines.push(`- inventory entries shown: ${resources.inventory.length}`);
+    lines.push(`- fetched text snapshots: ${resources.fetched.filter((resource) => resource.text).length}`);
+    lines.push('- large raw DOM/CSS/JS snapshots are intentionally omitted from this prompt; fetched resource bodies are available through resource/JS symbol tools when tool mode is active');
+    lines.push('- resources:');
+    if (resources.inventory.length === 0) {
+      lines.push('  - none detected');
     } else {
-      for (const src of deep.externalScripts) lines.push(`  - ${src}`);
+      for (const resource of resources.inventory.slice(0, 120)) {
+        const fetched = fetchedByUrl.get(resource.url);
+        const fetchedNote = fetched?.text
+          ? `; fetched ${fetched.text.length} chars${fetched.truncated ? ' (truncated)' : ''}`
+          : fetched?.error
+            ? `; fetch error: ${fetched.error}`
+            : fetched?.skipped
+              ? `; skipped: ${fetched.skipped}`
+              : '';
+        const sources = resource.sources?.length ? `; sources: ${resource.sources.join(', ')}` : '';
+        lines.push(`  - [${resource.id}] ${resource.kind}: ${resource.url}${sources}${fetchedNote}`);
+      }
+      if (resources.inventory.length > 120) lines.push(`  - ... ${resources.inventory.length - 120} more resources omitted from text inventory`);
     }
     lines.push('');
-    lines.push('inline scripts:');
-    lines.push('```js');
-    lines.push(deep.inlineScriptsRaw || '// none');
-    lines.push('```');
+
+    const jsResources = resources.fetched.filter((resource) => Array.isArray(resource.jsSymbols) && resource.jsSymbols.length > 0);
+    const allJsSymbols = jsResources.flatMap((resource) => resource.jsSymbols || []);
+    lines.push('### JS Symbol Index');
+    lines.push(`- indexed JS resources: ${jsResources.length}`);
+    lines.push(`- indexed JS symbols: ${allJsSymbols.length}`);
+    if (jsResources.some((resource) => resource.jsSymbolsTruncated)) {
+      lines.push('- one or more JS symbol lists were truncated for size');
+    }
+    if (allJsSymbols.length === 0) {
+      lines.push('- none indexed');
+    } else {
+      for (const symbol of allJsSymbols.slice(0, MAX_JS_SYMBOLS_IN_PROMPT)) {
+        const exported = symbol.exported ? ' exported' : '';
+        const declaration = symbol.declarationKind ? ` via ${symbol.declarationKind}` : '';
+        lines.push(`- ${symbol.id}: ${symbol.kind}${exported}${declaration} ${symbol.name} (${symbol.resourceId}:${symbol.lineStart}-${symbol.lineEnd}) ${symbol.signature}`);
+      }
+      if (allJsSymbols.length > MAX_JS_SYMBOLS_IN_PROMPT) {
+        lines.push(`- ... ${allJsSymbols.length - MAX_JS_SYMBOLS_IN_PROMPT} more symbols omitted; use JS symbol tools`);
+      }
+    }
     lines.push('');
 
     return {
       sectionText: lines.join('\n'),
-      data: { dom, styles, scripts, deep },
+      data: { dom, styles, scripts, deep, resources },
+      limits: resources.limits,
     };
   }
 
@@ -2169,10 +2928,12 @@
 
     let textContent = buildYouTubeTextContent(meta, description, transcript, comments);
     let technicalContext = null;
+    const limits = [];
     if (options.includeTechnicalContext) {
-      const technical = buildTechnicalContextSection();
+      const technical = await buildTechnicalContextSection();
       textContent += `\n\n${technical.sectionText}`;
       technicalContext = technical.data;
+      if (Array.isArray(technical.limits?.details)) limits.push(...technical.limits.details);
     }
     const wordCount = textContent.split(/\s+/).filter(Boolean).length;
 
@@ -2184,8 +2945,8 @@
       wordCount,
       technicalContext,
       contextLimits: {
-        applied: false,
-        details: [],
+        applied: limits.length > 0,
+        details: limits,
       },
     };
   }
@@ -2261,9 +3022,10 @@
     let textContent = built.textContent;
     let technicalContext = null;
     if (options.includeTechnicalContext) {
-      const technical = buildTechnicalContextSection();
+      const technical = await buildTechnicalContextSection();
       textContent += `\n\n${technical.sectionText}`;
       technicalContext = technical.data;
+      if (Array.isArray(technical.limits?.details)) limits.push(...technical.limits.details);
     }
     const wordCount = textContent.split(/\s+/).filter(Boolean).length;
 

@@ -9,6 +9,13 @@ const PAGE_CHATS_STORAGE_KEY = 'pageChatsByUrl';
 const MAX_SAVED_PAGE_CHATS = 50;
 const PORT_KEEPALIVE_INTERVAL_MS = 10000;
 const DEFAULT_FETCH_TIMEOUT_MS = 5000;
+const DEFAULT_RESOURCE_FETCH_TIMEOUT_MS = 4500;
+const DEFAULT_RESOURCE_FETCH_LIMITS = {
+  maxResources: 18,
+  maxCharsPerResource: 70000,
+  maxTotalChars: 320000,
+};
+const TEXT_RESOURCE_CONTENT_TYPE_RE = /^(?:text\/|image\/svg\+xml\b)|(?:javascript|ecmascript|json|manifest|xml)/i;
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = DEFAULT_FETCH_TIMEOUT_MS) {
   const controller = new AbortController();
@@ -21,6 +28,261 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = DEFAULT_FETCH_TIM
   } finally {
     clearTimeout(timeoutId);
   }
+}
+
+function clampNumber(value, min, max, fallback) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.min(max, Math.max(min, number));
+}
+
+function parseIPv4(hostname) {
+  const match = String(hostname || '').match(/^(\d{1,3})(?:\.(\d{1,3})){3}$/);
+  if (!match) return null;
+  const parts = hostname.split('.').map((part) => Number(part));
+  if (parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return null;
+  return parts;
+}
+
+function isLocalOrPrivateHostname(hostname) {
+  const host = String(hostname || '').replace(/^\[(.*)]$/, '$1').toLowerCase();
+  if (!host) return false;
+  if (host === 'localhost' || host.endsWith('.localhost')) return true;
+  if (host === '::1' || host === '0:0:0:0:0:0:0:1') return true;
+  if (host.startsWith('fc') || host.startsWith('fd') || host.startsWith('fe80:')) return true;
+
+  const ipv4 = parseIPv4(host);
+  if (!ipv4) return false;
+  const [a, b] = ipv4;
+  return (
+    a === 0 ||
+    a === 10 ||
+    a === 127 ||
+    (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168)
+  );
+}
+
+function normalizeFetchableHttpUrl(rawUrl) {
+  try {
+    const url = new URL(String(rawUrl || ''));
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+    return url;
+  } catch {
+    return null;
+  }
+}
+
+function canFetchPageResource(resourceUrl, pageUrl) {
+  const url = normalizeFetchableHttpUrl(resourceUrl);
+  if (!url) return { ok: false, reason: 'unsupported URL scheme' };
+
+  let page = null;
+  try {
+    page = pageUrl ? new URL(pageUrl) : null;
+  } catch {}
+
+  const resourceIsPrivate = isLocalOrPrivateHostname(url.hostname);
+  const pageIsPrivate = page ? isLocalOrPrivateHostname(page.hostname) : false;
+  if (resourceIsPrivate && !pageIsPrivate && url.origin !== page?.origin) {
+    return { ok: false, reason: 'blocked private-network resource from public page' };
+  }
+
+  return { ok: true, url: url.toString() };
+}
+
+function isLikelyTextResourceUrl(rawUrl) {
+  try {
+    const pathname = new URL(rawUrl).pathname.toLowerCase();
+    return /\.(?:cjs|css|csv|html?|js|json|jsx|mjs|map|md|svg|text|ts|tsx|txt|xml)(?:$|[?#])/.test(pathname);
+  } catch {
+    return false;
+  }
+}
+
+function isTextResourceCandidate(resource) {
+  const kind = String(resource?.kind || '').toLowerCase();
+  if (['script', 'stylesheet', 'manifest', 'fetch', 'xmlhttprequest', 'document', 'preload'].includes(kind)) return true;
+  if (isLikelyTextResourceUrl(resource?.url || '')) return true;
+  const type = String(resource?.type || '').toLowerCase();
+  return type.startsWith('text/') ||
+    type.includes('json') ||
+    type.includes('javascript') ||
+    type.includes('ecmascript') ||
+    type.includes('xml') ||
+    type.includes('svg');
+}
+
+async function readResponseTextWithLimit(response, charLimit) {
+  const reader = response.body?.getReader?.();
+  if (!reader) {
+    const value = await response.text();
+    return {
+      text: value.slice(0, charLimit),
+      truncated: value.length > charLimit,
+      originalLength: value.length,
+    };
+  }
+
+  const decoder = new TextDecoder();
+  let text = '';
+  let truncated = false;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      text += decoder.decode(value, { stream: true });
+      if (text.length > charLimit) {
+        text = text.slice(0, charLimit);
+        truncated = true;
+        try {
+          await reader.cancel();
+        } catch {}
+        break;
+      }
+    }
+    if (!truncated) text += decoder.decode();
+  } finally {
+    try {
+      reader.releaseLock?.();
+    } catch {}
+  }
+
+  return {
+    text,
+    truncated,
+    originalLength: text.length,
+  };
+}
+
+async function fetchPageResourceText(resource, pageUrl, limits) {
+  const permission = canFetchPageResource(resource?.url, pageUrl);
+  const base = {
+    id: String(resource?.id || ''),
+    url: String(resource?.url || ''),
+    kind: String(resource?.kind || 'resource'),
+    sources: Array.isArray(resource?.sources) ? resource.sources.slice(0, 6) : [],
+  };
+  if (!permission.ok) return { ...base, skipped: permission.reason };
+  if (!isTextResourceCandidate(resource)) return { ...base, skipped: 'not a text resource candidate' };
+
+  try {
+    const resp = await fetchWithTimeout(
+      permission.url,
+      {
+        credentials: 'include',
+        referrer: pageUrl || undefined,
+        referrerPolicy: 'strict-origin-when-cross-origin',
+      },
+      limits.timeoutMs
+    );
+    const contentType = resp.headers.get('content-type') || '';
+    const contentLength = Number(resp.headers.get('content-length') || 0);
+    const likelyText = TEXT_RESOURCE_CONTENT_TYPE_RE.test(contentType) || isLikelyTextResourceUrl(resp.url || permission.url);
+
+    if (!resp.ok) {
+      return {
+        ...base,
+        status: resp.status,
+        contentType,
+        error: `HTTP ${resp.status}`,
+      };
+    }
+    if (!likelyText) {
+      return {
+        ...base,
+        status: resp.status,
+        contentType,
+        contentLength: Number.isFinite(contentLength) && contentLength > 0 ? contentLength : null,
+        skipped: contentType ? `non-text content-type: ${contentType}` : 'non-text resource',
+      };
+    }
+
+    const read = await readResponseTextWithLimit(resp, limits.maxCharsPerResource);
+    return {
+      ...base,
+      url: resp.url || permission.url,
+      status: resp.status,
+      contentType,
+      contentLength: Number.isFinite(contentLength) && contentLength > 0 ? contentLength : null,
+      text: read.text,
+      truncated: read.truncated,
+      originalLength: read.originalLength,
+    };
+  } catch (err) {
+    return {
+      ...base,
+      error: err?.name === 'AbortError' ? 'fetch timed out or was aborted' : (err?.message || 'fetch failed'),
+    };
+  }
+}
+
+async function fetchPageResources(message) {
+  const rawLimits = message?.limits || {};
+  const limits = {
+    maxResources: clampNumber(rawLimits.maxResources, 1, 32, DEFAULT_RESOURCE_FETCH_LIMITS.maxResources),
+    maxCharsPerResource: clampNumber(rawLimits.maxCharsPerResource, 1000, 150000, DEFAULT_RESOURCE_FETCH_LIMITS.maxCharsPerResource),
+    maxTotalChars: clampNumber(rawLimits.maxTotalChars, 5000, 750000, DEFAULT_RESOURCE_FETCH_LIMITS.maxTotalChars),
+    timeoutMs: clampNumber(rawLimits.timeoutMs, 1000, 10000, DEFAULT_RESOURCE_FETCH_TIMEOUT_MS),
+  };
+  const resources = Array.isArray(message?.resources) ? message.resources : [];
+  const unique = [];
+  const seen = new Set();
+  for (const resource of resources) {
+    const url = String(resource?.url || '');
+    if (!url || seen.has(url)) continue;
+    seen.add(url);
+    unique.push(resource);
+    if (unique.length >= limits.maxResources) break;
+  }
+
+  const fetchedRaw = await Promise.all(unique.map((resource) => (
+    fetchPageResourceText(resource, message?.pageUrl || '', limits)
+  )));
+
+  const details = [];
+  if (resources.length > unique.length) {
+    details.push(`external resources: fetched candidates ${unique.length} of ${resources.length}`);
+  }
+
+  let totalChars = 0;
+  const fetched = fetchedRaw.map((resource) => {
+    if (!resource.text) return resource;
+    if (totalChars >= limits.maxTotalChars) {
+      details.push(`external resources: total text budget ${limits.maxTotalChars} chars reached`);
+      return {
+        ...resource,
+        text: '',
+        skipped: 'total text budget reached',
+      };
+    }
+    const remaining = limits.maxTotalChars - totalChars;
+    if (resource.text.length > remaining) {
+      totalChars += remaining;
+      details.push(`external resources: total text budget ${limits.maxTotalChars} chars reached`);
+      return {
+        ...resource,
+        text: resource.text.slice(0, remaining),
+        truncated: true,
+        originalLength: resource.originalLength || resource.text.length,
+      };
+    }
+    totalChars += resource.text.length;
+    return resource;
+  });
+
+  const skipped = fetched.filter((resource) => resource.skipped || resource.error).length;
+  if (skipped > 0) details.push(`external resources: ${skipped} fetches skipped or failed`);
+
+  return {
+    fetched,
+    limits: {
+      applied: details.length > 0,
+      details,
+    },
+  };
 }
 
 function createProvider(settings) {
@@ -67,6 +329,15 @@ function buildChatMessages(messages, pageContext, settings, options = {}) {
     systemContent += '\n\nTechnical DOM/CSS/JS analysis mode is enabled.';
     systemContent += '\nWhen the user asks implementation/debugging questions, use the TECHNICAL CONTEXT section.';
     systemContent += '\nIf a requested technical detail is not present there, say that explicitly instead of guessing.';
+    const fetchedResources = pageContext.technicalContext?.resources?.fetched || [];
+    const fetchedResourceCount = Array.isArray(fetchedResources)
+      ? fetchedResources.filter((resource) => resource?.text).length
+      : 0;
+    if (fetchedResourceCount > 0) {
+      systemContent += useToolMode
+        ? `\nExternal page resource snapshots are available to tools for ${fetchedResourceCount} text resources, such as JS/CSS/JSON/HTML files. Use resource and JS symbol tools for exact source.`
+        : `\nThe prompt includes compact resource and JS symbol indexes for ${fetchedResourceCount} fetched text resources. Large raw resource bodies are intentionally omitted from the prompt.`;
+    }
   }
   systemContent += `\n\nFinal reminder: reply only in ${selectedLanguage}.`;
   if (pageContext?.textContent && !useToolMode) {
@@ -690,6 +961,10 @@ browser.runtime.onMessage.addListener(async (message) => {
     } catch (err) {
       return { text: '', error: err.message };
     }
+  }
+
+  if (message.type === 'fetchPageResources') {
+    return fetchPageResources(message);
   }
 
   // Fetch YouTube transcript via innertube get_transcript endpoint
