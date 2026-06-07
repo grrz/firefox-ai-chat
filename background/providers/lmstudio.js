@@ -687,12 +687,16 @@ export class LMStudioProvider extends OpenAIProvider {
     // Merge tool instructions into the first system message instead of adding
     // a second system message — many jinja templates break on multiple system messages.
     const toolInstruction = [
+      'Technical evidence policy: answer page-specific technical questions only from current page context and tool results.',
+      'Do not answer implementation, debugging, DOM, CSS, JavaScript, network, resource, selector, URL-construction, function, class, method, or constant questions from general knowledge or guesses.',
       'Use tools for page inspection instead of asking for full context dump.',
       'For questions about comments, discussion, replies, audience reaction, or commenter opinions, use search_comments or get_comments first.',
       'For questions about external JavaScript, CSS, manifests, API payloads, or page resource implementation details, use search_resources or get_resource_chunk first.',
       'For questions about a JavaScript function, class, method, or constant, use list_js_symbols first, then get_js_symbol for the exact source slice.',
+      'Cite checked resource ids, symbol ids, selectors, URLs, line ranges, or source tags when making technical claims.',
+      'If the needed data is missing, inaccessible, truncated, or not found by tools, say that plainly and list what was checked.',
       'Do not spend time on long internal planning.',
-      'If details are missing, call one useful tool immediately; after tool results, answer the user directly.',
+      'If details are missing, call one useful tool immediately; after tool results, answer the user directly from verified page evidence only.',
     ].join(' ');
     const sysIdx = toolMessages.findIndex((m) => m.role === 'system');
     if (sysIdx !== -1) {

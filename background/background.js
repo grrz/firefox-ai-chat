@@ -327,16 +327,19 @@ function buildChatMessages(messages, pageContext, settings, options = {}) {
   }
   if (pageContext?.technicalContext) {
     systemContent += '\n\nTechnical DOM/CSS/JS analysis mode is enabled.';
-    systemContent += '\nWhen the user asks implementation/debugging questions, use the TECHNICAL CONTEXT section.';
-    systemContent += '\nIf a requested technical detail is not present there, say that explicitly instead of guessing.';
+    systemContent += '\nTechnical evidence policy: for implementation, debugging, DOM, CSS, JavaScript, network, resource, selector, function, class, method, constant, URL-construction, or page-behavior questions, answer only from data extracted from the current page.';
+    systemContent += '\nDo not answer technical page-specific questions from general knowledge, framework assumptions, common patterns, or guesses.';
+    systemContent += '\nIf exact page data is missing, inaccessible, truncated, or not inspected, say that clearly and name what data was checked or unavailable.';
+    systemContent += '\nWhen making a technical claim, ground it in page evidence such as resource ids, symbol ids, selectors, source tags, URLs, line ranges, or tool results.';
+    systemContent += '\nDo not present unverified inferences as facts. If you must infer, label it as an unverified inference and keep it separate from verified page facts.';
     const fetchedResources = pageContext.technicalContext?.resources?.fetched || [];
     const fetchedResourceCount = Array.isArray(fetchedResources)
       ? fetchedResources.filter((resource) => resource?.text).length
       : 0;
     if (fetchedResourceCount > 0) {
       systemContent += useToolMode
-        ? `\nExternal page resource snapshots are available to tools for ${fetchedResourceCount} text resources, such as JS/CSS/JSON/HTML files. Use resource and JS symbol tools for exact source.`
-        : `\nThe prompt includes compact resource and JS symbol indexes for ${fetchedResourceCount} fetched text resources. Large raw resource bodies are intentionally omitted from the prompt.`;
+        ? `\nExternal page resource snapshots are available to tools for ${fetchedResourceCount} text resources, such as JS/CSS/JSON/HTML files. For source-level questions, inspect the relevant resource or JS symbol tool before answering.`
+        : `\nThe prompt includes compact resource and JS symbol indexes for ${fetchedResourceCount} fetched text resources. Large raw resource bodies are intentionally omitted from the prompt; do not claim source-level details unless they are visible in the prompt.`;
     }
   }
   systemContent += `\n\nFinal reminder: reply only in ${selectedLanguage}.`;
